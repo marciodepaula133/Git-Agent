@@ -3,7 +3,7 @@
 
 ## Git-Agent
 
-This repo builds Git-Agent: Claude Code skills (`create-branch`, `commit`, `push`, `create-pr`, `update-branch`, `configure`) backed by one shared git/GitHub subagent built on the Claude Agent SDK. TypeScript/Node.js. No implementation exists yet.
+This repo builds Git-Agent: Claude Code skills (`create-branch`, `commit`, `push`, `create-pr`, `update-branch`, `configure`) backed by one shared git/GitHub subagent built on the Claude Agent SDK. TypeScript/Node.js. Only a base TypeScript project is scaffolded so far (`subagent/src/cli.ts` is a placeholder) — no skills, actions, or the no-force-push hook exist yet.
 
 The sections below are instructions for you, Claude Code, working in this repo — they are not the product's own behavior. Git-Agent's own git rules (never force-push, never rebase, etc.) are a spec for the code you're writing, documented in `docs/`, not a description of how you should use git while developing this repo.
 
@@ -20,11 +20,11 @@ Read [docs/architecture.md](docs/architecture.md) and the matching page in [docs
 - [docs/architecture.md](docs/architecture.md) — the full design: skill/subagent split, every hard invariant, conventions, stack.
 - [docs/skills/](docs/skills/) — one page per skill: what it does, its rules, its done-when criteria.
 - [docs/initial-guidelines.md](docs/initial-guidelines.md) — the author's original hand-written rules this project is built from.
-- Planned (not yet scaffolded) layout: `skills/<name>/`, `subagent/src/actions/<action>.ts`, `subagent/src/hooks/no-force-push.ts` — see `docs/architecture.md`.
+- Planned (not yet built) layout: `skills/<name>/`, `subagent/src/actions/<action>.ts`, `subagent/src/hooks/no-force-push.ts` — see `docs/architecture.md`.
 
 ## Running and verifying
 
-- No code exists yet — no `package.json`, no build/test/lint commands. TODO once `subagent/` is scaffolded: pin these commands here, and set up ESLint + strict `tsconfig.json` (`strict: true`) as the actual enforcement point for TypeScript conventions, rather than relying on prose in this file.
+- `npm install` then `npm run build` (compiles `subagent/src` to `dist/`), `npm run typecheck` (`tsc --noEmit` under `strict: true`), `npm run lint` (ESLint via `eslint.config.js`).
 - Requires the `@anthropic-ai/claude-code` CLI installed locally as the subagent's execution backend and auth source. The installer should detect an existing `claude` CLI rather than `npm install` it — that install path is deprecated upstream as of 2026-09-27.
 - `@anthropic-ai/claude-agent-sdk` is a fast-moving package (multiple releases a day) — re-check the current version at install time rather than trusting any version pinned in a doc.
 
