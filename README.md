@@ -6,7 +6,7 @@ It installs into a repository with `npx`, the way BMad does, and uses that repos
 
 ## Status
 
-Planning is complete; implementation hasn't started. There's no `package.json`, `skills/`, or `subagent/` on disk yet — see [docs/architecture.md](docs/architecture.md) for the planned layout.
+Planning is complete; implementation is just starting. A base TypeScript project is scaffolded (`package.json`, `subagent/src/cli.ts` placeholder); `skills/` and the real subagent actions/hooks don't exist yet — see [docs/architecture.md](docs/architecture.md) for the planned layout.
 
 ## Documentation
 
