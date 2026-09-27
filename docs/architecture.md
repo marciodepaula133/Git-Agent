@@ -4,13 +4,13 @@
 
 Git-Agent has two halves:
 
-- **Skills** — six Claude Code skills (`create-branch`, `commit`, `push`, `create-pr`, `update-branch`, `configure`) that run inside the user's normal interactive Claude Code session. Skills own the whole conversation: every question asked of the user, every decision the user makes, and any state that needs to survive across more than one step of a flow (e.g. holding a commit plan while the user reviews it).
+- **Skills** — six Claude Code skills (`git-agent-create-branch`, `git-agent-commit`, `git-agent-push`, `git-agent-create-pr`, `git-agent-update-branch`, `git-agent-configure`), installed and invoked with a `git-agent-` prefix to avoid collisions with other installed skills (`docs/initial-guidelines.md`), that run inside the user's normal interactive Claude Code session. Skills own the whole conversation: every question asked of the user, every decision the user makes, and any state that needs to survive across more than one step of a flow (e.g. holding a commit plan while the user reviews it). The subagent's own subcommands stay unprefixed and verb-first (`create-branch`, `plan-commit`, ...) — the prefix is a skill-naming concern only.
 - **One shared subagent** — a standalone TypeScript program built on the Claude Agent SDK. It's invoked fresh as a subprocess for each action, does one thing, and returns. It never asks the user anything, never remembers a previous call, and carries its own git/GitHub tool access and safety rules in its own code.
 
 A skill talks to the subagent by running it as a subprocess and exchanging JSON: it writes the input to the subagent's stdin, and the subagent's last line of stdout is a single JSON object with the result. The subagent talks to git, GitHub, and the local repo directly; skills never do.
 
 ```
-skills/<skill-name>/           Claude Code skill definitions
+skills/git-agent-<name>/       Claude Code skill definitions (installed/invoked name is prefixed)
 subagent/src/cli.ts            single binary, routes to one handler per action
 subagent/src/actions/*.ts      one file per subagent action (create-branch, plan-commit, push, ...)
 subagent/src/hooks/*.ts        safety rules shared by every action (e.g. no-force-push)
@@ -18,7 +18,7 @@ install/setup.ts               first-run and re-run config flow
 <installed repo>/.git-agent/config.json   per-repo settings (task types, default PR target)
 ```
 
-Only a base TypeScript project is scaffolded so far (`package.json`, `tsconfig.json`, `subagent/src/cli.ts` as a placeholder); the rest of this layout — skills, actions, hooks, `install/setup.ts` — is still target, not built.
+The `create-branch` action, the `no-force-push` hook, and the `git-agent-create-branch` skill are built; `install/setup.ts` and the remaining actions/skills are still target, not built.
 
 ## Why split this way
 

@@ -5,3 +5,7 @@
 - source_plan: `C:/Users/marci/Documents/Projetos/Git-Agent/_bmad-output/implementation-artifacts/plan-initial-repo-scaffolding.md`
   summary: Create the six `skills/<name>/SKILL.md` skeletons (`create-branch`, `commit`, `push`, `create-pr`, `update-branch`, `configure`) with frontmatter and a placeholder body pointing at each skill's doc/spec.
   evidence: User chose to defer skill skeletons out of the base scaffolding plan.
+
+- source_plan: `C:/Users/marci/Documents/Projetos/Git-Agent/_bmad-output/implementation-artifacts/plan-create-branch-skill.md`
+  summary: Add `npm test` to CLAUDE.md's "Running and verifying" list so the new `no-force-push`/`create-branch` unit tests (17 cases) are part of the documented verification workflow, not just discoverable by reading package.json.
+  evidence: verification-gap review lens confirmed CLAUDE.md's documented commands (install/build/typecheck/lint) omit `npm test`, and no CI exists either — a contributor following CLAUDE.md exactly would never run the safety-relevant hook tests. Routed to defer rather than patch because the fix edits an agent-context file (CLAUDE.md), which review triage rules always defer regardless of the lens's own suggested disposition.
