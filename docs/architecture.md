@@ -18,7 +18,7 @@ install/setup.ts               first-run and re-run config flow
 <installed repo>/.git-agent/config.json   per-repo settings (task types, default PR target)
 ```
 
-None of this exists on disk yet — it's the target layout, not what's built.
+Only a base TypeScript project is scaffolded so far (`package.json`, `tsconfig.json`, `subagent/src/cli.ts` as a placeholder); the rest of this layout — skills, actions, hooks, `install/setup.ts` — is still target, not built.
 
 ## Why split this way
 
