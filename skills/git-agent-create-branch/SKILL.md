@@ -39,10 +39,17 @@ this skill has to keep, and it holds even if any step below fails.
    task/issue number was given, or `<type>/<description>` when it wasn't —
    never a dangling separator.
 
-5. **Run the subagent's `create-branch` action:**
+5. **Run the subagent's `create-branch` action.** The subagent is bundled
+   alongside this skill — it ships in this same installed folder, no
+   separate package install needed. Run:
    ```
-   npx --yes @marciodepaula133/git-agent create-branch
+   node "<this skill's own installed directory>/subagent/cli.mjs" create-branch
    ```
+   where `<this skill's own installed directory>` is the folder this
+   `SKILL.md` file itself was loaded from (Claude Code reports this when
+   invoking a skill; if it isn't already apparent from context, locate it
+   from the path this file was read from). `subagent/cli.mjs` is always a
+   fixed path relative to that folder.
    Pipe exactly one JSON object on stdin (never as a CLI argument):
    ```json
    { "branchName": "<computed branch name>" }
@@ -62,8 +69,8 @@ this skill has to keep, and it holds even if any step below fails.
 
 ## Rules
 
-- This skill never runs `git` directly — only the subagent does, via
-  `npx --yes @marciodepaula133/git-agent create-branch`.
+- This skill never runs `git` directly — only the subagent does, via the
+  bundled `subagent/cli.mjs` sitting next to this file.
 - This is a single subagent call. There is nothing to approve mid-flow — type,
   task number, and description are all settled in conversation before the
   call happens.
