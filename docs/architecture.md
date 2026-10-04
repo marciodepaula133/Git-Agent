@@ -88,7 +88,7 @@ These are the hard invariants. Nothing about how a skill is built should be able
 | TypeScript / Node.js | current LTS |
 | `@anthropic-ai/claude-agent-sdk` | releases multiple times a day — treat any pinned version as a snapshot to re-check at install time, not a fixed fact |
 | `@anthropic-ai/claude-code` (CLI) | required locally — it's the SDK's execution backend and auth source. As of this writing, installing it via `npm install` is deprecated upstream in favor of the curl/Homebrew/native installers; the installer should detect an existing `claude` CLI rather than assume or perform an npm install of it |
-| Distribution | npm package, installed with `npx`, published from the author's own GitHub repo (not a marketplace plugin) |
+| Distribution | npm package `@marciodepaula133/git-agent` (scoped — the unscoped `git-agent` name is already taken by an unrelated package), installed with `npx`, published from the author's own GitHub repo (not a marketplace plugin) |
 
 ## Known open items
 

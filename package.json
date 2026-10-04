@@ -1,5 +1,5 @@
 {
-  "name": "git-agent",
+  "name": "@marciodepaula133/git-agent",
   "version": "0.0.0",
   "private": true,
   "description": "Claude Code skills backed by one shared git/GitHub subagent.",

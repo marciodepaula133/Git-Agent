@@ -41,7 +41,7 @@ this skill has to keep, and it holds even if any step below fails.
 
 5. **Run the subagent's `create-branch` action:**
    ```
-   npx --yes git-agent create-branch
+   npx --yes @marciodepaula133/git-agent create-branch
    ```
    Pipe exactly one JSON object on stdin (never as a CLI argument):
    ```json
@@ -63,7 +63,7 @@ this skill has to keep, and it holds even if any step below fails.
 ## Rules
 
 - This skill never runs `git` directly — only the subagent does, via
-  `npx --yes git-agent create-branch`.
+  `npx --yes @marciodepaula133/git-agent create-branch`.
 - This is a single subagent call. There is nothing to approve mid-flow — type,
   task number, and description are all settled in conversation before the
   call happens.
