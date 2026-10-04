@@ -2,6 +2,8 @@
 import { createBranch, type CreateBranchInput } from './actions/create-branch.js';
 import { draftPr, type DraftPrInput } from './actions/draft-pr.js';
 import { createPr } from './actions/create-pr.js';
+import { merge, type MergeInput } from './actions/merge.js';
+import { finishMerge, type FinishMergeInput } from './actions/finish-merge.js';
 
 type ActionHandler = (input: unknown) => Promise<unknown>;
 
@@ -9,6 +11,8 @@ const actions: Record<string, ActionHandler> = {
   'create-branch': (input) => createBranch(input as CreateBranchInput),
   'draft-pr': (input) => draftPr(input as DraftPrInput),
   'create-pr': (input) => createPr(input),
+  merge: (input) => merge(input as MergeInput),
+  'finish-merge': (input) => finishMerge(input as FinishMergeInput),
 };
 
 async function readStdin(): Promise<string> {

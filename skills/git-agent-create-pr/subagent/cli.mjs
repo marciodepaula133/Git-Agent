@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-// ../../../node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
+// node_modules/@anthropic-ai/claude-agent-sdk/sdk.mjs
 import { createRequire as nV } from "node:module";
 import { randomUUID as Nl } from "crypto";
 import { createHash as lV, randomBytes as Wze } from "crypto";
@@ -24593,11 +24593,294 @@ ${resultText}
   }
 }
 
+// subagent/src/actions/merge.ts
+var RESULT_LINE4 = /^RESULT:\s*(up-to-date|fast-forward|merged|invalid-target|conflict|error)\s*$/im;
+var FILE_LINE = /^FILE:\s*(.+)$/im;
+function escapeRegExp3(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function splitRemoteQualified(from) {
+  const slashIndex = from.indexOf("/");
+  if (slashIndex <= 0 || slashIndex === from.length - 1) return null;
+  return { remote: from.slice(0, slashIndex), branch: from.slice(slashIndex + 1) };
+}
+function buildPrompt4(from) {
+  const remoteSplit = splitRemoteQualified(from);
+  const lines = [
+    `You are merging "${from}" into the current branch in the current repository, using a plain merge \u2014 never a rebase.`,
+    "Follow these steps exactly, in order, and do nothing else:",
+    "1. Run: git remote",
+    `2. Look at that output. If "${from}" contains a "/", take everything before the FIRST "/" as a candidate remote name and everything after it as a candidate branch name. If that candidate remote name appears as one of the exact lines printed by step 1, treat "${from}" as remote-qualified with that remote and branch; otherwise treat "${from}" as a plain local ref and skip step 3 entirely.`
+  ];
+  if (remoteSplit) {
+    lines.push(
+      `3. If (and only if) "${from}" was determined to be remote-qualified in step 2, run: git fetch ${remoteSplit.remote} ${remoteSplit.branch}`,
+      '   If that fetch fails, do not run any other command. Reply with exactly one line: "RESULT: error" followed by the error text on the next line, and stop.'
+    );
+  } else {
+    lines.push(`3. "${from}" has no "/", so it cannot be remote-qualified \u2014 skip any fetch.`);
+  }
+  lines.push(
+    `4. Run: git rev-parse --verify --quiet ${from}^{commit}`,
+    '   If that command exits with a non-zero status, do not run any other command. Reply with exactly one line: "RESULT: invalid-target" and stop.',
+    "5. Run: git rev-parse HEAD",
+    "   Remember this output exactly as PRE_HEAD.",
+    `6. Run: git merge --no-edit ${from}`,
+    "   Never pass -X ours, -X theirs, --squash, or any other flag beyond --no-edit. Never run git merge --abort, git rebase, or git reset, no matter what happens next or afterward.",
+    "7. If step 6 exited with a non-zero status (a conflict):",
+    "   Run: git status --porcelain=v1",
+    '   Identify every line whose two-letter status code has "U" in either position, or is exactly "AA" or "DD" \u2014 these are the conflicting files.',
+    "   Leave the working tree exactly as git left it \u2014 do not stage, commit, or abort anything.",
+    '   Reply with "RESULT: conflict" on its own line, followed by one "FILE: <path>" line per conflicting file (using the exact path from the status output), and stop.',
+    "8. If step 6 exited with status 0 (no conflict):",
+    "   Run: git rev-parse HEAD",
+    '   If this output is character-for-character identical to PRE_HEAD, reply with exactly one line: "RESULT: up-to-date" and stop.',
+    "   Otherwise, run: git log -1 --format=%P HEAD",
+    '   If that output contains exactly one commit hash, reply with exactly one line: "RESULT: fast-forward" and stop.',
+    '   If that output contains exactly two commit hashes, reply with exactly one line: "RESULT: merged" and stop.',
+    '   If it contains any other number of hashes, reply with "RESULT: error" followed by that output on the next line, and stop.',
+    "Never run git push, git rebase, git merge --abort, git reset, git stash, git commit, or any command with a force flag."
+  );
+  return lines.join("\n");
+}
+function parseOutcome2(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE4, "gim"))) {
+    lastMatch = match;
+  }
+  if (!lastMatch) return { outcome: "error", tail: "" };
+  return {
+    outcome: lastMatch[1],
+    tail: resultText.slice((lastMatch.index ?? 0) + lastMatch[0].length)
+  };
+}
+function parseConflictFiles(tail) {
+  const files = [];
+  for (const match of tail.matchAll(new RegExp(FILE_LINE, "gim"))) {
+    files.push(match[1].trim());
+  }
+  return files;
+}
+function mergeOnlyIntendedCommandsHook(from) {
+  const escapedFrom = escapeRegExp3(from);
+  const remoteSplit = splitRemoteQualified(from);
+  const allowedCommands = [
+    /^git remote$/,
+    new RegExp(`^git rev-parse --verify --quiet ${escapedFrom}\\^\\{commit\\}$`),
+    /^git rev-parse HEAD$/,
+    new RegExp(`^git merge --no-edit ${escapedFrom}$`),
+    /^git status --porcelain=v1$/,
+    /^git log -1 --format=%P HEAD$/
+  ];
+  if (remoteSplit) {
+    allowedCommands.push(
+      new RegExp(`^git fetch ${escapeRegExp3(remoteSplit.remote)} ${escapeRegExp3(remoteSplit.branch)}$`)
+    );
+  }
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    if (allowedCommands.some((pattern) => pattern.test(command))) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: merge may only run its fixed sequence of git commands for "${from}" (got: ${command}).`
+      }
+    };
+  };
+}
+async function merge(input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    const from = input?.from;
+    if (typeof from !== "string" || from.length === 0) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    let outcome = "error";
+    let tail = "";
+    const stream = runQuery({
+      prompt: buildPrompt4(from),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // Use the user's own locally installed `claude` CLI (resolved via
+        // PATH) as the execution backend — see create-branch.ts for why.
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [mergeOnlyIntendedCommandsHook(from)] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          ({ outcome, tail } = parseOutcome2(message.result));
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent merge: model's final reply did not contain a recognized RESULT line. Full reply:
+${message.result}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent merge: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "up-to-date" || outcome === "fast-forward" || outcome === "merged") {
+      return { ok: true, result: outcome };
+    }
+    if (outcome === "invalid-target") return { ok: false, reason: "invalid-target" };
+    if (outcome === "conflict") return { ok: false, reason: "conflict", files: parseConflictFiles(tail) };
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(`git-agent merge: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`);
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
+// subagent/src/actions/finish-merge.ts
+var RESULT_LINE5 = /^RESULT:\s*(completed|conflict|no-merge-in-progress|error)\s*$/im;
+var FILE_LINE2 = /^FILE:\s*(.+)$/im;
+function buildPrompt5() {
+  return [
+    "You are completing an in-progress git merge in the current repository, after the user has resolved its conflicts by hand.",
+    "Follow these steps exactly, in order, and do nothing else:",
+    "1. Run: git rev-parse -q --verify MERGE_HEAD",
+    "   If that command exits with a non-zero status (or prints nothing), there is no merge in progress.",
+    '   Do not run any other command. Reply with exactly one line: "RESULT: no-merge-in-progress" and stop.',
+    "2. Run: git status --porcelain=v1",
+    '   Identify every line whose two-letter status code has "U" in either position, or is exactly "AA" or "DD" \u2014 these are the unmerged files. Remember this exact list of paths; it never changes for the rest of these steps.',
+    "3. For each unmerged file from step 2, run: git diff --check -- <that file>",
+    '   If any of them still shows a leftover conflict marker, or you otherwise see "<<<<<<<", "=======", or ">>>>>>>" still present in any of these files, do not stage or commit anything.',
+    '   Reply with "RESULT: conflict" on its own line, followed by one "FILE: <path>" line per unmerged file that still has markers, and stop.',
+    '4. If none of the unmerged files from step 2 have any markers left, stage exactly those files, one at a time: run "git add <path>" once per file, using its exact path from step 2. Never run "git add -A", "git add -u", "git add .", or add any file not in that list.',
+    "5. Run: git commit --no-edit",
+    "   This must use the default merge commit message already set from MERGE_HEAD \u2014 never pass -m or any other message override, and never --amend.",
+    '6. If the commit in step 5 succeeds, reply with exactly one line: "RESULT: completed" and stop.',
+    '7. If the commit in step 5 fails for any reason, reply with "RESULT: error" followed by the error text on the next line, and stop.',
+    "Never run git merge --abort, git rebase, git reset, git stash, or any command with a force flag."
+  ].join("\n");
+}
+function parseOutcome3(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE5, "gim"))) {
+    lastMatch = match;
+  }
+  if (!lastMatch) return { outcome: "error", tail: "" };
+  return {
+    outcome: lastMatch[1],
+    tail: resultText.slice((lastMatch.index ?? 0) + lastMatch[0].length)
+  };
+}
+function parseConflictFiles2(tail) {
+  const files = [];
+  for (const match of tail.matchAll(new RegExp(FILE_LINE2, "gim"))) {
+    files.push(match[1].trim());
+  }
+  return files;
+}
+function finishMergeOnlyIntendedCommandsHook() {
+  const allowedExact = [/^git rev-parse -q --verify MERGE_HEAD$/, /^git status --porcelain=v1$/, /^git commit --no-edit$/];
+  const diffCheck = /^git diff --check( -- .+)?$/;
+  const singlePathAdd = /^git add (?:"[^"]+"|'[^']+'|(?!\.{1,2}$)[^\s"'-][^\s]*)$/;
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    const allowed = allowedExact.some((pattern) => pattern.test(command)) || diffCheck.test(command) || singlePathAdd.test(command);
+    if (allowed) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: finish-merge may only check merge/conflict state, add one exact unmerged path at a time, and commit with --no-edit (got: ${command}).`
+      }
+    };
+  };
+}
+async function finishMerge(_input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    let outcome = "error";
+    let tail = "";
+    const stream = runQuery({
+      prompt: buildPrompt5(),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // Use the user's own locally installed `claude` CLI (resolved via
+        // PATH) as the execution backend — see create-branch.ts for why.
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [finishMergeOnlyIntendedCommandsHook()] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          ({ outcome, tail } = parseOutcome3(message.result));
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent finish-merge: model's final reply did not contain a recognized RESULT line. Full reply:
+${message.result}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent finish-merge: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "completed") return { ok: true };
+    if (outcome === "conflict") return { ok: false, reason: "conflict", files: parseConflictFiles2(tail) };
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(`git-agent finish-merge: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`);
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
 // subagent/src/cli.ts
 var actions = {
   "create-branch": (input) => createBranch(input),
   "draft-pr": (input) => draftPr(input),
-  "create-pr": (input) => createPr(input)
+  "create-pr": (input) => createPr(input),
+  merge: (input) => merge(input),
+  "finish-merge": (input) => finishMerge(input)
 };
 async function readStdin() {
   const chunks = [];
