@@ -24205,6 +24205,13 @@ async function createBranch(input, deps = {}) {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
         allowDangerouslySkipPermissions: true,
+        // Use the user's own locally installed `claude` CLI (resolved via
+        // PATH) as the execution backend, rather than the SDK's bundled
+        // platform-native binary — that binary ships as a sibling package
+        // in the SDK's own node_modules, which doesn't exist once this
+        // file is bundled and installed standalone inside another repo's
+        // skill folder (no node_modules tree for it to be found in).
+        pathToClaudeCodeExecutable: "claude",
         hooks: {
           PreToolUse: [
             noForcePushHookMatcher,
