@@ -24215,13 +24215,30 @@ async function createBranch(input, deps = {}) {
     });
     for await (const message of stream) {
       if (message.type === "result") {
-        outcome = message.subtype === "success" ? parseOutcome(message.result) : "error";
+        if (message.subtype === "success") {
+          outcome = parseOutcome(message.result);
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent create-branch: model's final reply did not contain a recognized RESULT line. Full reply:
+${message.result}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent create-branch: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
       }
     }
     if (outcome === "created") return { ok: true, branchName };
     if (outcome === "branch-exists") return { ok: false, reason: "branch-exists" };
     return { ok: false, reason: "unexpected-error" };
-  } catch {
+  } catch (error) {
+    process.stderr.write(`git-agent create-branch: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`);
     return { ok: false, reason: "unexpected-error" };
   }
 }

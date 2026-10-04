@@ -50,6 +50,24 @@ test('treats an unparsable final result as unexpected-error rather than throwing
   assert.deepEqual(result, { ok: false, reason: 'unexpected-error' });
 });
 
+test('maps a non-success result subtype (e.g. error_during_execution) to ok:false with an unexpected-error reason', async () => {
+  const queryFn = (() => {
+    async function* generator() {
+      yield {
+        type: 'result',
+        subtype: 'error_during_execution',
+        is_error: true,
+        stop_reason: 'api_error',
+        errors: ['something went wrong talking to the model'],
+      };
+    }
+    return generator();
+  }) as unknown as QueryFn;
+
+  const result = await createBranch({ branchName: 'fix/typo' }, { queryFn });
+  assert.deepEqual(result, { ok: false, reason: 'unexpected-error' });
+});
+
 test('maps a thrown session error to ok:false with an unexpected-error reason', async () => {
   const throwingQueryFn = (() => {
     throw new Error('subprocess failed to spawn');
