@@ -16,7 +16,9 @@ Never lose uncommitted work. No modification may be staged, dropped, or overwrit
 
 ## Shape
 
-One subagent call: `create-branch`. There's no plan to approve here — type, task number, and description are already settled in conversation before the call happens.
+Installed and invoked as `git-agent-create-branch` (`/git-agent-create-branch`), prefixed per `docs/initial-guidelines.md` to avoid collisions with other installed skills. Its directory is `skills/git-agent-create-branch/`.
+
+One subagent call: the unprefixed `create-branch` subcommand. There's no plan to approve here — type, task number, and description are already settled in conversation before the call happens.
 
 ## Out of scope
 
