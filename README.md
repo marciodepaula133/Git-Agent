@@ -6,7 +6,7 @@ It installs into a repository with `npx skills add`, the way BMad does, and uses
 
 ## Status
 
-`create-branch` (skill + subagent action + safety hooks), `git-agent-setup`, and `git-agent-configure` are built. The remaining four git/GitHub skills are still target, not built — see [docs/architecture.md](docs/architecture.md) for the planned layout.
+`create-branch`, `push` (skill + subagent action + safety hooks), `git-agent-setup`, and `git-agent-configure` are built. The remaining git/GitHub skills are still target, not built — see [docs/architecture.md](docs/architecture.md) for the planned layout and current status.
 
 ## Documentation
 

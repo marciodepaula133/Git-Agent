@@ -24250,12 +24250,142 @@ ${message.result}
   }
 }
 
-// subagent/src/actions/draft-pr.ts
-var RESULT_LINE2 = /^RESULT:\s*(ok|invalid-target|no-changes|error)\s*$/im;
+// subagent/src/actions/push.ts
+var RESULT_LINE2 = /^RESULT:\s*(pushed|non-fast-forward|wrong-branch|error)\s*$/im;
+function buildPrompt2(branchName) {
+  return [
+    `You are pushing the local branch named exactly "${branchName}" to its remote.`,
+    "Follow these steps exactly, in order, and do nothing else:",
+    "1. Run: git rev-parse --abbrev-ref HEAD",
+    `2. If its output is not exactly "${branchName}", do not push anything. Reply with`,
+    '   exactly one line: "RESULT: wrong-branch" and stop.',
+    `3. Run: git rev-parse --abbrev-ref --symbolic-full-name ${branchName}@{upstream}`,
+    "4. If that command exits with status 0, the branch already has an upstream.",
+    "   Run: git push",
+    `5. If that command exits with a non-zero status, the branch has no upstream yet.`,
+    `   Run: git push -u origin ${branchName}`,
+    "6. If the push (from step 4 or step 5) succeeds, reply with exactly one line:",
+    '   "RESULT: pushed" and stop.',
+    "7. If the push is rejected because the remote has commits this branch does not",
+    '   (a non-fast-forward / "updates were rejected" rejection), do not retry, do not',
+    "   force, and do not run any other command. Reply with exactly one line:",
+    '   "RESULT: non-fast-forward" and stop.',
+    "8. If the push fails for any other reason, reply with exactly one line:",
+    '   "RESULT: error" followed by the error text on the next line, and stop.',
+    "Never pass --force, -f, --force-with-lease, or any other force-shaped flag, under",
+    "any circumstance. Never run git commit, git add, git reset, git rebase, git stash,",
+    "or any command other than the ones listed above. Never modify, stage, or drop any file."
+  ].join("\n");
+}
+function parseOutcome2(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE2, "gim"))) {
+    lastMatch = match;
+  }
+  return lastMatch ? lastMatch[1] : "error";
+}
 function escapeRegExp2(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function buildPrompt2(targetBranch) {
+function createOnlyIntendedCommandsHook2(branchName) {
+  const escapedName = escapeRegExp2(branchName);
+  const allowedCommands = [
+    /^git rev-parse --abbrev-ref HEAD$/,
+    new RegExp(`^git rev-parse --abbrev-ref --symbolic-full-name ${escapedName}@\\{upstream\\}$`),
+    /^git push$/,
+    new RegExp(`^git push -u origin ${escapedName}$`)
+  ];
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    if (allowedCommands.some((pattern) => pattern.test(command))) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: push may only check for an upstream and then run a plain "git push" or "git push -u origin ${branchName}" (got: ${command}).`
+      }
+    };
+  };
+}
+async function push(input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    const branchName = input?.branchName;
+    if (typeof branchName !== "string" || branchName.length === 0) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    let outcome = "error";
+    const stream = runQuery({
+      prompt: buildPrompt2(branchName),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // Use the user's own locally installed `claude` CLI (resolved via
+        // PATH) as the execution backend, rather than the SDK's bundled
+        // platform-native binary — that binary ships as a sibling package
+        // in the SDK's own node_modules, which doesn't exist once this
+        // file is bundled and installed standalone inside another repo's
+        // skill folder (no node_modules tree for it to be found in).
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [createOnlyIntendedCommandsHook2(branchName)] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          outcome = parseOutcome2(message.result);
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent push: model's final reply did not contain a recognized RESULT line. Full reply:
+${message.result}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent push: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "pushed") return { ok: true, branchName };
+    if (outcome === "non-fast-forward") return { ok: false, reason: "non-fast-forward" };
+    if (outcome === "wrong-branch") {
+      process.stderr.write(
+        `git-agent push: refusing to push \u2014 checked-out branch did not match requested branchName "${branchName}".
+`
+      );
+    }
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(`git-agent push: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`);
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
+// subagent/src/actions/draft-pr.ts
+var RESULT_LINE3 = /^RESULT:\s*(ok|invalid-target|no-changes|error)\s*$/im;
+function escapeRegExp3(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function buildPrompt3(targetBranch) {
   return [
     `You are drafting a pull request for the current branch of the git repository in the current`,
     `directory, targeting "${targetBranch}". This is a read-only pass: you must not stage, commit,`,
@@ -24313,7 +24443,7 @@ function buildPrompt2(targetBranch) {
 }
 function parseOutcomeLine(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE2, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE3, "gim"))) {
     lastMatch = match;
   }
   return lastMatch ? lastMatch[1] : "error";
@@ -24340,7 +24470,7 @@ function parseDraftJson(jsonText) {
   return { title: v.title, body: v.body };
 }
 function draftPrReadOnlyHook(targetBranch) {
-  const escapedTarget = escapeRegExp2(targetBranch);
+  const escapedTarget = escapeRegExp3(targetBranch);
   const allowedPatterns = [
     new RegExp(`^git show-ref --verify --quiet refs/heads/${escapedTarget}$`),
     new RegExp(`^git ls-remote --exit-code --heads origin ${escapedTarget}$`),
@@ -24378,7 +24508,7 @@ async function draftPr(input, deps = {}) {
     let outcome = "error";
     let resultText = "";
     const stream = runQuery({
-      prompt: buildPrompt2(targetBranch),
+      prompt: buildPrompt3(targetBranch),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24438,11 +24568,11 @@ ${resultText}
 }
 
 // subagent/src/actions/create-pr.ts
-var RESULT_LINE3 = /^RESULT:\s*(ok|branch-exists|error)\s*$/im;
+var RESULT_LINE4 = /^RESULT:\s*(ok|branch-exists|error)\s*$/im;
 function buildGhPrCreateCommand(input) {
   return [`gh pr create --base "${input.targetBranch}" --title "${input.title}" --body-file - <<'EOF'`, input.body, "EOF"].join("\n");
 }
-function buildPrompt3(input) {
+function buildPrompt4(input) {
   const command = buildGhPrCreateCommand(input);
   return [
     "You are opening a pull request for the current branch of the git repository in the current",
@@ -24473,7 +24603,7 @@ function buildPrompt3(input) {
 }
 function parseOutcomeLine2(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE3, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE4, "gim"))) {
     lastMatch = match;
   }
   return lastMatch ? lastMatch[1] : "error";
@@ -24535,7 +24665,7 @@ async function createPr(input, deps = {}) {
     let outcome = "error";
     let resultText = "";
     const stream = runQuery({
-      prompt: buildPrompt3(input),
+      prompt: buildPrompt4(input),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24594,9 +24724,9 @@ ${resultText}
 }
 
 // subagent/src/actions/merge.ts
-var RESULT_LINE4 = /^RESULT:\s*(up-to-date|fast-forward|merged|invalid-target|conflict|error)\s*$/im;
+var RESULT_LINE5 = /^RESULT:\s*(up-to-date|fast-forward|merged|invalid-target|conflict|error)\s*$/im;
 var FILE_LINE = /^FILE:\s*(.+)$/im;
-function escapeRegExp3(value) {
+function escapeRegExp4(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 function splitRemoteQualified(from) {
@@ -24604,7 +24734,7 @@ function splitRemoteQualified(from) {
   if (slashIndex <= 0 || slashIndex === from.length - 1) return null;
   return { remote: from.slice(0, slashIndex), branch: from.slice(slashIndex + 1) };
 }
-function buildPrompt4(from) {
+function buildPrompt5(from) {
   const remoteSplit = splitRemoteQualified(from);
   const lines = [
     `You are merging "${from}" into the current branch in the current repository, using a plain merge \u2014 never a rebase.`,
@@ -24643,9 +24773,9 @@ function buildPrompt4(from) {
   );
   return lines.join("\n");
 }
-function parseOutcome2(resultText) {
+function parseOutcome3(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE4, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE5, "gim"))) {
     lastMatch = match;
   }
   if (!lastMatch) return { outcome: "error", tail: "" };
@@ -24662,7 +24792,7 @@ function parseConflictFiles(tail) {
   return files;
 }
 function mergeOnlyIntendedCommandsHook(from) {
-  const escapedFrom = escapeRegExp3(from);
+  const escapedFrom = escapeRegExp4(from);
   const remoteSplit = splitRemoteQualified(from);
   const allowedCommands = [
     /^git remote$/,
@@ -24674,7 +24804,7 @@ function mergeOnlyIntendedCommandsHook(from) {
   ];
   if (remoteSplit) {
     allowedCommands.push(
-      new RegExp(`^git fetch ${escapeRegExp3(remoteSplit.remote)} ${escapeRegExp3(remoteSplit.branch)}$`)
+      new RegExp(`^git fetch ${escapeRegExp4(remoteSplit.remote)} ${escapeRegExp4(remoteSplit.branch)}$`)
     );
   }
   return async (input) => {
@@ -24707,7 +24837,7 @@ async function merge(input, deps = {}) {
     let outcome = "error";
     let tail = "";
     const stream = runQuery({
-      prompt: buildPrompt4(from),
+      prompt: buildPrompt5(from),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24726,7 +24856,7 @@ async function merge(input, deps = {}) {
     for await (const message of stream) {
       if (message.type === "result") {
         if (message.subtype === "success") {
-          ({ outcome, tail } = parseOutcome2(message.result));
+          ({ outcome, tail } = parseOutcome3(message.result));
           if (outcome === "error") {
             process.stderr.write(
               `git-agent merge: model's final reply did not contain a recognized RESULT line. Full reply:
@@ -24757,9 +24887,9 @@ ${message.result}
 }
 
 // subagent/src/actions/finish-merge.ts
-var RESULT_LINE5 = /^RESULT:\s*(completed|conflict|no-merge-in-progress|error)\s*$/im;
+var RESULT_LINE6 = /^RESULT:\s*(completed|conflict|no-merge-in-progress|error)\s*$/im;
 var FILE_LINE2 = /^FILE:\s*(.+)$/im;
-function buildPrompt5() {
+function buildPrompt6() {
   return [
     "You are completing an in-progress git merge in the current repository, after the user has resolved its conflicts by hand.",
     "Follow these steps exactly, in order, and do nothing else:",
@@ -24779,9 +24909,9 @@ function buildPrompt5() {
     "Never run git merge --abort, git rebase, git reset, git stash, or any command with a force flag."
   ].join("\n");
 }
-function parseOutcome3(resultText) {
+function parseOutcome4(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE5, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE6, "gim"))) {
     lastMatch = match;
   }
   if (!lastMatch) return { outcome: "error", tail: "" };
@@ -24828,7 +24958,7 @@ async function finishMerge(_input, deps = {}) {
     let outcome = "error";
     let tail = "";
     const stream = runQuery({
-      prompt: buildPrompt5(),
+      prompt: buildPrompt6(),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24847,7 +24977,7 @@ async function finishMerge(_input, deps = {}) {
     for await (const message of stream) {
       if (message.type === "result") {
         if (message.subtype === "success") {
-          ({ outcome, tail } = parseOutcome3(message.result));
+          ({ outcome, tail } = parseOutcome4(message.result));
           if (outcome === "error") {
             process.stderr.write(
               `git-agent finish-merge: model's final reply did not contain a recognized RESULT line. Full reply:
@@ -24877,6 +25007,7 @@ ${message.result}
 // subagent/src/cli.ts
 var actions = {
   "create-branch": (input) => createBranch(input),
+  push: (input) => push(input),
   "draft-pr": (input) => draftPr(input),
   "create-pr": (input) => createPr(input),
   merge: (input) => merge(input),
