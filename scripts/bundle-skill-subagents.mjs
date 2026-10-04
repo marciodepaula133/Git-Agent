@@ -14,7 +14,11 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 // here gets the exact same bundled file at `<skillDir>/subagent/cli.mjs` —
 // duplicated per skill folder (not symlinked), since each skill can be
 // installed independently of the others.
-const SKILLS_NEEDING_SUBAGENT = ['git-agent-create-branch', 'git-agent-update-branch'];
+const SKILLS_NEEDING_SUBAGENT = [
+  'git-agent-create-branch',
+  'git-agent-create-pr',
+  'git-agent-update-branch',
+];
 
 for (const skillName of SKILLS_NEEDING_SUBAGENT) {
   const outfile = path.join(repoRoot, 'skills', skillName, 'subagent', 'cli.mjs');

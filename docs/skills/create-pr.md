@@ -13,6 +13,7 @@ Opening a pull request with a title and body that already follow house conventio
 
 - **There is no branch-parent tracking, for any branch.** The target always defaults to the config file's `defaultPrTarget`, shown to the user for confirmation or override before `create-pr` runs. A parent-tracking mechanism (git config, a state file, some derivation heuristic) was considered during planning and explicitly dropped — its failure modes (staleness after a rename or delete, orphaned entries) outweighed the payoff.
 - **Two-call shape**: `draft-pr` produces a draft, the user edits it, then `create-pr` actually opens it. A single call never spans a user decision.
+- **`create-pr` reuses the `branch-exists` reason for "a PR is already open for this branch."** There is no dedicated enum value for that case, since the closed failure-reason set is shared across every subagent action — the skill surfaces it to the user as "a pull request already exists for this branch" rather than literally repeating "branch-exists."
 
 ## Out of scope
 
