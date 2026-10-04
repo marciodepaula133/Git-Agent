@@ -23,7 +23,7 @@ skills/git-agent-configure/           on-demand re-run of the same config flow (
 <installed repo>/.git-agent/config.json   per-repo settings (task types, default PR target)
 ```
 
-The `create-branch` action, the `no-force-push` hook, the `git-agent-create-branch` skill (with its bundled subagent), `git-agent-setup`, and `git-agent-configure` are built; the remaining actions/skills are still target, not built.
+The `create-branch`, `draft-pr`, and `create-pr` actions, the `no-force-push` hook, the `git-agent-create-branch` and `git-agent-create-pr` skills (each with its own bundled subagent copy), `git-agent-setup`, and `git-agent-configure` are built; the remaining actions/skills are still target, not built.
 
 First-run setup is a skill (`git-agent-setup`, invoked as `/git-agent-setup`), not a separate `install/`-dir Node CLI run outside Claude Code — this keeps every Git-Agent capability reachable the same way (a slash-command skill), rather than inventing a second, `npx`/`bin`-based invocation path the project's bundled-into-skill-folder distribution story doesn't otherwise need.
 
