@@ -9,16 +9,20 @@ Git-Agent has two halves:
 
 A skill talks to the subagent by running it as a subprocess and exchanging JSON: it writes the input to the subagent's stdin, and the subagent's last line of stdout is a single JSON object with the result. The subagent talks to git, GitHub, and the local repo directly; skills never do.
 
+The subagent binary isn't a published npm package the skill reaches via `npx` — it's bundled (via esbuild, SDK and all dependencies inlined into one self-contained file) directly into each skill folder that needs it, so installing the skill (via the generic `skills` CLI, see Stack below) brings the subagent along with it. No npm publish, no `npm link`, no separate install step.
+
 ```
-skills/git-agent-<name>/       Claude Code skill definitions (installed/invoked name is prefixed)
-subagent/src/cli.ts            single binary, routes to one handler per action
-subagent/src/actions/*.ts      one file per subagent action (create-branch, plan-commit, push, ...)
-subagent/src/hooks/*.ts        safety rules shared by every action (e.g. no-force-push)
-install/setup.ts               first-run and re-run config flow
+skills/git-agent-<name>/              Claude Code skill definitions (installed/invoked name is prefixed)
+skills/git-agent-<name>/subagent/cli.mjs   bundled subagent, built by `npm run bundle` — ships with the skill
+subagent/src/cli.ts                   single binary source, routes to one handler per action
+subagent/src/actions/*.ts             one file per subagent action (create-branch, plan-commit, push, ...)
+subagent/src/hooks/*.ts               safety rules shared by every action (e.g. no-force-push)
+scripts/bundle-skill-subagents.mjs    bundles subagent/src/cli.ts and copies it into every skill that needs it
+install/setup.ts                      first-run and re-run config flow
 <installed repo>/.git-agent/config.json   per-repo settings (task types, default PR target)
 ```
 
-The `create-branch` action, the `no-force-push` hook, and the `git-agent-create-branch` skill are built; `install/setup.ts` and the remaining actions/skills are still target, not built.
+The `create-branch` action, the `no-force-push` hook, and the `git-agent-create-branch` skill (with its bundled subagent) are built; `install/setup.ts` and the remaining actions/skills are still target, not built.
 
 ## Why split this way
 
@@ -34,7 +38,7 @@ These are the hard invariants. Nothing about how a skill is built should be able
 2. **The subagent is real code, not a declarative Claude Code subagent file.** It's a TypeScript program that calls the Claude Agent SDK's `query()`/`ClaudeSDKClient` itself, launched as a subprocess. This is what lets it carry its own safety hook — a `.claude/agents/*.md` definition invoked via the `Task` tool can't scope a hook to just itself.
 3. **No force-push, ever, structurally.** The subagent registers a `PreToolUse` hook on its own SDK session's `Bash` tool matcher. The hook is deny-by-default for anything push-shaped: it parses the actual argument tokens (not one regex over the raw command string), and only lets through a recognized plain `git push` / `gh` push-equivalent with no force-indicating flag anywhere — covering `--force`, `-f`, `--force-with-lease=<ref>`, and combined short flags like `-uf`. Anything it doesn't recognize as a safe plain push is denied, not allowed through. This hook lives only inside the subagent's own SDK session — never in `settings.json`, never affecting the user's manual terminal, never affecting any other Claude Code session.
 4. **Every git-mutating action must run git through the SDK's own tool-use loop.** If an action shelled out to git directly (e.g. `child_process.exec`) instead of issuing it as a `Bash` tool call inside the same `query()` session that registered the hook, the hook would simply never fire. This is the condition that makes rule 3 actually work.
-5. **One subagent binary, subcommand-routed.** Like `git` itself: one `bin` entry, routing on the first argument to one handler per action. New actions are new routed handlers, not new binaries.
+5. **One subagent binary, subcommand-routed.** Like `git` itself: `subagent/src/cli.ts` is the single source routing on the first argument to one handler per action. New actions are new routed handlers, not new binaries — `npm run bundle` then copies the same compiled binary into every skill folder that needs it.
 6. **Call count follows whether a plan needs approval:**
 
    | Flow | Calls | Shape |
@@ -88,7 +92,8 @@ These are the hard invariants. Nothing about how a skill is built should be able
 | TypeScript / Node.js | current LTS |
 | `@anthropic-ai/claude-agent-sdk` | releases multiple times a day — treat any pinned version as a snapshot to re-check at install time, not a fixed fact |
 | `@anthropic-ai/claude-code` (CLI) | required locally — it's the SDK's execution backend and auth source. As of this writing, installing it via `npm install` is deprecated upstream in favor of the curl/Homebrew/native installers; the installer should detect an existing `claude` CLI rather than assume or perform an npm install of it |
-| Distribution | npm package `@marciodepaula133/git-agent` (scoped — the unscoped `git-agent` name is already taken by an unrelated package), installed with `npx`, published from the author's own GitHub repo (not a marketplace plugin) |
+| `esbuild` | bundles `subagent/src/cli.ts` (SDK and all dependencies inlined) into one self-contained file per skill that needs it — `npm run bundle` |
+| Distribution | installed via the generic `skills` CLI (`npx skills add <repo> --skill <name>`, the same tool used for this repo's own BMad skills), not a published npm package — the subagent is bundled into the skill folder itself (see above), so there is nothing to `npm publish`. `@marciodepaula133/git-agent` remains this repo's own (private, unpublished) `package.json` name for local dev/build tooling only. |
 
 ## Known open items
 
