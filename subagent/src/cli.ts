@@ -1,10 +1,14 @@
 #!/usr/bin/env node
 import { createBranch, type CreateBranchInput } from './actions/create-branch.js';
+import { merge, type MergeInput } from './actions/merge.js';
+import { finishMerge, type FinishMergeInput } from './actions/finish-merge.js';
 
 type ActionHandler = (input: unknown) => Promise<unknown>;
 
 const actions: Record<string, ActionHandler> = {
   'create-branch': (input) => createBranch(input as CreateBranchInput),
+  merge: (input) => merge(input as MergeInput),
+  'finish-merge': (input) => finishMerge(input as FinishMergeInput),
 };
 
 async function readStdin(): Promise<string> {
