@@ -77,13 +77,18 @@ test('maps a thrown session error to ok:false with an unexpected-error reason', 
   assert.deepEqual(result, { ok: false, reason: 'unexpected-error' });
 });
 
-test('restricts the session to the Bash tool and wires the no-force-push PreToolUse hook', async () => {
+test('restricts the session to the Bash tool, wires the no-force-push PreToolUse hook, and points at the local claude CLI', async () => {
   const captured: { value?: Options } = {};
   await createBranch({ branchName: 'feature/1-x' }, { queryFn: fakeQuery('RESULT: created', captured) });
 
   assert.deepEqual(captured.value?.tools, ['Bash']);
   const preToolUse = captured.value?.hooks?.PreToolUse as HookCallbackMatcher[] | undefined;
   assert.ok(preToolUse && preToolUse.length > 0, 'expected a PreToolUse hook to be registered');
+  // Must use the user's own locally installed claude CLI, not the SDK's
+  // bundled native binary - that binary isn't reachable once this file is
+  // bundled standalone into another repo's skill folder (see PR that added
+  // this: the SDK threw "Native CLI binary for win32-x64 not found" without it).
+  assert.equal(captured.value?.pathToClaudeCodeExecutable, 'claude');
 });
 
 test('rejects malformed input shapes without throwing or invoking the session', async () => {
