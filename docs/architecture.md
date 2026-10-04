@@ -4,7 +4,7 @@
 
 Git-Agent has two halves:
 
-- **Skills** — six Claude Code skills (`git-agent-create-branch`, `git-agent-commit`, `git-agent-push`, `git-agent-create-pr`, `git-agent-update-branch`, `git-agent-configure`), installed and invoked with a `git-agent-` prefix to avoid collisions with other installed skills (`docs/initial-guidelines.md`), that run inside the user's normal interactive Claude Code session. Skills own the whole conversation: every question asked of the user, every decision the user makes, and any state that needs to survive across more than one step of a flow (e.g. holding a commit plan while the user reviews it). The subagent's own subcommands stay unprefixed and verb-first (`create-branch`, `plan-commit`, ...) — the prefix is a skill-naming concern only.
+- **Skills** — seven Claude Code skills (`git-agent-create-branch`, `git-agent-commit`, `git-agent-push`, `git-agent-create-pr`, `git-agent-update-branch`, `git-agent-configure`, `git-agent-setup`), installed and invoked with a `git-agent-` prefix to avoid collisions with other installed skills (`docs/initial-guidelines.md`), that run inside the user's normal interactive Claude Code session. Skills own the whole conversation: every question asked of the user, every decision the user makes, and any state that needs to survive across more than one step of a flow (e.g. holding a commit plan while the user reviews it). The subagent's own subcommands stay unprefixed and verb-first (`create-branch`, `plan-commit`, ...) — the prefix is a skill-naming concern only. `git-agent-setup` and `git-agent-configure` are the two exceptions to "every skill talks to the subagent": both are plain file I/O against the per-repo config file, with no subagent call at all.
 - **One shared subagent** — a standalone TypeScript program built on the Claude Agent SDK. It's invoked fresh as a subprocess for each action, does one thing, and returns. It never asks the user anything, never remembers a previous call, and carries its own git/GitHub tool access and safety rules in its own code.
 
 A skill talks to the subagent by running it as a subprocess and exchanging JSON: it writes the input to the subagent's stdin, and the subagent's last line of stdout is a single JSON object with the result. The subagent talks to git, GitHub, and the local repo directly; skills never do.
@@ -18,11 +18,14 @@ subagent/src/cli.ts                   single binary source, routes to one handle
 subagent/src/actions/*.ts             one file per subagent action (create-branch, plan-commit, push, ...)
 subagent/src/hooks/*.ts               safety rules shared by every action (e.g. no-force-push)
 scripts/bundle-skill-subagents.mjs    bundles subagent/src/cli.ts and copies it into every skill that needs it
-install/setup.ts                      first-run and re-run config flow
+skills/git-agent-setup/               first-run config flow (no subagent, no bundled subagent folder)
+skills/git-agent-configure/           on-demand re-run of the same config flow (no subagent)
 <installed repo>/.git-agent/config.json   per-repo settings (task types, default PR target)
 ```
 
-The `create-branch` action, the `no-force-push` hook, and the `git-agent-create-branch` skill (with its bundled subagent) are built; `install/setup.ts` and the remaining actions/skills are still target, not built.
+The `create-branch` action, the `no-force-push` hook, the `git-agent-create-branch` skill (with its bundled subagent), `git-agent-setup`, and `git-agent-configure` are built; the remaining actions/skills are still target, not built.
+
+First-run setup is a skill (`git-agent-setup`, invoked as `/git-agent-setup`), not a separate `install/`-dir Node CLI run outside Claude Code — this keeps every Git-Agent capability reachable the same way (a slash-command skill), rather than inventing a second, `npx`/`bin`-based invocation path the project's bundled-into-skill-folder distribution story doesn't otherwise need.
 
 ## Why split this way
 
@@ -48,10 +51,10 @@ These are the hard invariants. Nothing about how a skill is built should be able
    | push | 1 | `push` — hook-enforced, never force |
    | create-pr | 2 | `draft-pr` → user edits → `create-pr` |
    | update-branch | 1 or 2 | `merge` (clean = done; conflict = report and hand off) → `finish-merge` only if there was a conflict |
-   | configure | 0 | direct file I/O in the skill; no subagent involved |
+   | configure / setup | 0 | direct file I/O in the skill; no subagent involved |
 
 7. **There is no branch-parent tracking, anywhere.** `create-pr` never tries to detect what a branch was created from. The target branch always defaults to the repo's configured `defaultPrTarget`, shown to the user to confirm or override before the PR is actually created. A parent-tracking mechanism was considered and deliberately dropped — its failure modes (a stale record after a rename or delete) outweighed the convenience.
-8. **The subagent never touches the config file.** `.git-agent/config.json` (task/branch types, default PR target) is read and written directly by skills. The `configure` skill writes it; every other skill reads it when it needs those values. The subagent has no config code path at all — config isn't git/GitHub work.
+8. **The subagent never touches the config file.** `.git-agent/config.json` (task/branch types, default PR target) is read and written directly by skills. `git-agent-setup` and `git-agent-configure` write it; every other skill reads it when it needs those values. The subagent has no config code path at all — config isn't git/GitHub work.
 9. **The commit plan has one fixed shape, and "local-only" detection belongs to the subagent, not the skill.** `plan-commit` is the only thing that decides a file looks local-only (things like `.env`, `.env.*`, `*.pem`, `*.key`, `credentials*`, `secrets*`, `*.local` — a seed list meant to grow). The skill never scans the working tree itself. `plan-commit` always succeeds (`ok: true`) and returns:
 
    ```json

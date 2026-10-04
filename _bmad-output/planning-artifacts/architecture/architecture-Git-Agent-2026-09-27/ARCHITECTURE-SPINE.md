@@ -139,6 +139,7 @@ git-agent/
     create-pr/
     update-branch/
     configure/               # direct config file I/O, no subagent call
+    setup/                   # same config flow as configure/, first-run framing; no subagent call
   subagent/
     src/
       cli.ts                 # single bin entry, routes argv[2] to an action handler
@@ -153,8 +154,6 @@ git-agent/
         finish-merge.ts
       hooks/
         no-force-push.ts     # options.hooks PreToolUse callback (AD-3), shared by every action's query() call
-  install/
-    setup.ts                 # first-run + re-run config flow (FR-10)
   {repo-being-installed-into}/
     .git-agent/
       config.json             # taskTypes, defaultPrTarget (FR-10/FR-11)
@@ -169,7 +168,7 @@ git-agent/
 | FR-6 (push, no force) | `subagent/src/actions/push.ts`, `subagent/src/hooks/no-force-push.ts` | AD-2, AD-3, AD-4 |
 | FR-7, FR-8 (create-pr) | `skills/create-pr/`, `subagent/src/actions/draft-pr.ts`, `create-pr.ts` | AD-1, AD-4, AD-6, AD-7 |
 | FR-9 (update-branch) | `skills/update-branch/`, `subagent/src/actions/merge.ts`, `finish-merge.ts` | AD-1, AD-4, AD-6, AD-10 |
-| FR-10, FR-11 (config) | `skills/configure/`, `install/setup.ts`, `.git-agent/config.json` | AD-8 |
+| FR-10, FR-11 (config) | `skills/setup/`, `skills/configure/`, `.git-agent/config.json` | AD-8 |
 
 ## Deferred
 
