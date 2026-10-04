@@ -1,10 +1,12 @@
 #!/usr/bin/env node
 import { createBranch, type CreateBranchInput } from './actions/create-branch.js';
+import { push, type PushInput } from './actions/push.js';
 
 type ActionHandler = (input: unknown) => Promise<unknown>;
 
 const actions: Record<string, ActionHandler> = {
   'create-branch': (input) => createBranch(input as CreateBranchInput),
+  push: (input) => push(input as PushInput),
 };
 
 async function readStdin(): Promise<string> {
