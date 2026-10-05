@@ -24706,11 +24706,770 @@ ${resultText}
   }
 }
 
+// subagent/src/actions/push.ts
+var RESULT_LINE4 = /^RESULT:\s*(pushed|non-fast-forward|wrong-branch|error)\s*$/im;
+function buildPrompt4(branchName) {
+  return [
+    `You are pushing the local branch named exactly "${branchName}" to its remote.`,
+    "Follow these steps exactly, in order, and do nothing else:",
+    "1. Run: git rev-parse --abbrev-ref HEAD",
+    `2. If its output is not exactly "${branchName}", do not push anything. Reply with`,
+    '   exactly one line: "RESULT: wrong-branch" and stop.',
+    `3. Run: git rev-parse --abbrev-ref --symbolic-full-name ${branchName}@{upstream}`,
+    "4. If that command exits with status 0, the branch already has an upstream.",
+    "   Run: git push",
+    `5. If that command exits with a non-zero status, the branch has no upstream yet.`,
+    `   Run: git push -u origin ${branchName}`,
+    "6. If the push (from step 4 or step 5) succeeds, reply with exactly one line:",
+    '   "RESULT: pushed" and stop.',
+    "7. If the push is rejected because the remote has commits this branch does not",
+    '   (a non-fast-forward / "updates were rejected" rejection), do not retry, do not',
+    "   force, and do not run any other command. Reply with exactly one line:",
+    '   "RESULT: non-fast-forward" and stop.',
+    "8. If the push fails for any other reason, reply with exactly one line:",
+    '   "RESULT: error" followed by the error text on the next line, and stop.',
+    "Never pass --force, -f, --force-with-lease, or any other force-shaped flag, under",
+    "any circumstance. Never run git commit, git add, git reset, git rebase, git stash,",
+    "or any command other than the ones listed above. Never modify, stage, or drop any file."
+  ].join("\n");
+}
+function parseOutcome2(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE4, "gim"))) {
+    lastMatch = match;
+  }
+  return lastMatch ? lastMatch[1] : "error";
+}
+function escapeRegExp2(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function createOnlyIntendedCommandsHook2(branchName) {
+  const escapedName = escapeRegExp2(branchName);
+  const allowedCommands = [
+    /^git rev-parse --abbrev-ref HEAD$/,
+    new RegExp(`^git rev-parse --abbrev-ref --symbolic-full-name ${escapedName}@\\{upstream\\}$`),
+    /^git push$/,
+    new RegExp(`^git push -u origin ${escapedName}$`)
+  ];
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    if (allowedCommands.some((pattern) => pattern.test(command))) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: push may only check for an upstream and then run a plain "git push" or "git push -u origin ${branchName}" (got: ${command}).`
+      }
+    };
+  };
+}
+async function push(input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    const branchName = input?.branchName;
+    if (typeof branchName !== "string" || branchName.length === 0) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    let outcome = "error";
+    const stream = runQuery({
+      prompt: buildPrompt4(branchName),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // Use the user's own locally installed `claude` CLI (resolved via
+        // PATH) as the execution backend, rather than the SDK's bundled
+        // platform-native binary — that binary ships as a sibling package
+        // in the SDK's own node_modules, which doesn't exist once this
+        // file is bundled and installed standalone inside another repo's
+        // skill folder (no node_modules tree for it to be found in).
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [createOnlyIntendedCommandsHook2(branchName)] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          outcome = parseOutcome2(message.result);
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent push: model's final reply did not contain a recognized RESULT line. Full reply:
+${message.result}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent push: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "pushed") return { ok: true, branchName };
+    if (outcome === "non-fast-forward") return { ok: false, reason: "non-fast-forward" };
+    if (outcome === "wrong-branch") {
+      process.stderr.write(
+        `git-agent push: refusing to push \u2014 checked-out branch did not match requested branchName "${branchName}".
+`
+      );
+    }
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(`git-agent push: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`);
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
+// subagent/src/actions/draft-pr.ts
+var RESULT_LINE5 = /^RESULT:\s*(ok|invalid-target|no-changes|error)\s*$/im;
+function escapeRegExp3(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function buildPrompt5(targetBranch) {
+  return [
+    `You are drafting a pull request for the current branch of the git repository in the current`,
+    `directory, targeting "${targetBranch}". This is a read-only pass: you must not stage, commit,`,
+    "push, create a PR, or otherwise modify the working tree, the index, history, or anything remote.",
+    "",
+    "Follow these steps, in order:",
+    `1. Run: git show-ref --verify --quiet refs/heads/${targetBranch}`,
+    "   to check whether the target branch exists locally.",
+    "2. If step 1 exited non-zero (the branch does not exist locally), also run:",
+    `   git ls-remote --exit-code --heads origin ${targetBranch}`,
+    "   to check whether it exists on origin.",
+    "3. If the target branch exists in neither place, reply with exactly one line:",
+    '   "RESULT: invalid-target" and stop. Do not run any other command.',
+    `4. Run: git log ${targetBranch}..HEAD --format=%s`,
+    "   to list the subject line of every commit the current branch is ahead of the target by.",
+    "5. If that list is empty (the current branch has no commits ahead of the target), reply with",
+    '   exactly one line: "RESULT: no-changes" and stop. Do not run any other command.',
+    "6. Run: git branch --show-current",
+    '   to get the current branch name. Parse it by splitting on the FIRST "/" into `type` and',
+    "   `rest`. If `rest` matches the pattern `^(\\d+)-(.+)$`, the first group is `task` and the",
+    "   second is `description`; otherwise `description` is all of `rest` and there is no `task`.",
+    '7. Build `title` as `"${type}: ${description with every "-" replaced by a single space}"`, then',
+    '   append `" (#${task})"` at the end when a `task` was found in step 6. For example, branch',
+    '   "feature/42-digest-delivery" against any target yields title',
+    '   "feature: digest delivery (#42)"; branch "fix/typo-cleanup" yields title "fix: typo cleanup"',
+    '   (no "(#...)" suffix, since there is no task number).',
+    `8. Run: git diff ${targetBranch}...HEAD --name-only`,
+    '   to list every changed file path relative to the target. Group these paths by "concern": the',
+    "   first two `/`-separated path segments (e.g. `subagent/src/actions/draft-pr.ts` and",
+    "   `subagent/src/actions/create-pr.ts` are both the same concern, `subagent/src`; a file with",
+    "   only one path segment is its own concern by that one segment alone). Keep the concerns in the",
+    "   order their files first appear in the `git diff` output.",
+    "9. Build `body` as exactly two Markdown sections, in this order, with one blank line between",
+    "   them and nothing before or after:",
+    "   - `## Summary` followed by one `- ` bullet per commit subject line from step 4, in the order",
+    "     `git log` printed them (newest commit last, i.e. the same order the command printed).",
+    "   - `## Test plan` followed by one `- [ ] ` checklist item per distinct concern from step 8,",
+    '     each naming that concern in a short human sentence (e.g. "- [ ] Verify subagent/src/actions',
+    '     changes" or "- [ ] Verify skills/git-agent-create-pr changes"). If there is only one',
+    "     concern, that section still has exactly one checklist item.",
+    '10. Reply with exactly one line "RESULT: ok" followed immediately, on the next lines, by exactly',
+    "    one JSON object and nothing else (no markdown fences, no trailing commentary), of this exact",
+    "    shape:",
+    '    {"title": "...", "body": "..."}',
+    '    where "body" is the full Markdown string built in step 9, with real newline characters',
+    '    encoded as JSON string escapes ("\\n").',
+    "11. If anything prevents you from completing the steps above (an unexpected git error, etc.),",
+    '    reply with exactly one line "RESULT: error" followed by the error text on the next line, and',
+    "    stop.",
+    "",
+    "Never run git push, git commit, git add, git reset, git rebase, git stash, gh pr create, or any",
+    "command with a force flag. Never modify, stage, or drop any file, and never contact anything",
+    "remote except the read-only `git ls-remote` check in step 2."
+  ].join("\n");
+}
+function parseOutcomeLine3(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE5, "gim"))) {
+    lastMatch = match;
+  }
+  return lastMatch ? lastMatch[1] : "error";
+}
+function textAfterResultLine3(resultText) {
+  const lines = resultText.split("\n");
+  let lastIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^RESULT:\s*ok\s*$/im.test(lines[i])) lastIndex = i;
+  }
+  if (lastIndex === -1) return "";
+  return lines.slice(lastIndex + 1).join("\n").trim();
+}
+function parseDraftJson(jsonText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const v = parsed;
+  if (typeof v.title !== "string" || typeof v.body !== "string") return null;
+  return { title: v.title, body: v.body };
+}
+function draftPrReadOnlyHook(targetBranch) {
+  const escapedTarget = escapeRegExp3(targetBranch);
+  const allowedPatterns = [
+    new RegExp(`^git show-ref --verify --quiet refs/heads/${escapedTarget}$`),
+    new RegExp(`^git ls-remote --exit-code --heads origin ${escapedTarget}$`),
+    new RegExp(`^git log ${escapedTarget}\\.\\.HEAD --format=%s$`),
+    /^git branch --show-current$/,
+    new RegExp(`^git diff ${escapedTarget}\\.\\.\\.HEAD --name-only$`)
+  ];
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    if (allowedPatterns.some((pattern) => pattern.test(command))) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: draft-pr is a read-only drafting pass and may only run the fixed set of git inspection commands it needs (got: ${command}).`
+      }
+    };
+  };
+}
+async function draftPr(input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    const targetBranch = input?.targetBranch;
+    if (typeof targetBranch !== "string" || targetBranch.length === 0) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    let outcome = "error";
+    let resultText = "";
+    const stream = runQuery({
+      prompt: buildPrompt5(targetBranch),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // See create-branch.ts for why this must point at the locally
+        // installed `claude` CLI rather than the SDK's bundled native binary.
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [draftPrReadOnlyHook(targetBranch)] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          resultText = message.result;
+          outcome = parseOutcomeLine3(resultText);
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent draft-pr: model's final reply did not contain a recognized RESULT line. Full reply:
+${resultText}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent draft-pr: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "invalid-target") return { ok: false, reason: "invalid-target" };
+    if (outcome === "no-changes") return { ok: false, reason: "no-changes" };
+    if (outcome === "ok") {
+      const draft = parseDraftJson(textAfterResultLine3(resultText));
+      if (!draft) {
+        process.stderr.write(`git-agent draft-pr: could not parse draft JSON from model reply:
+${resultText}
+`);
+        return { ok: false, reason: "unexpected-error" };
+      }
+      return { ok: true, title: draft.title, body: draft.body, targetBranch };
+    }
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(
+      `git-agent draft-pr: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`
+    );
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
+// subagent/src/actions/create-pr.ts
+var RESULT_LINE6 = /^RESULT:\s*(ok|branch-exists|error)\s*$/im;
+function buildGhPrCreateCommand(input) {
+  return [`gh pr create --base "${input.targetBranch}" --title "${input.title}" --body-file - <<'EOF'`, input.body, "EOF"].join("\n");
+}
+function buildPrompt6(input) {
+  const command = buildGhPrCreateCommand(input);
+  return [
+    "You are opening a pull request for the current branch of the git repository in the current",
+    "directory. The title, body, and target branch below were already composed and approved by the",
+    "user in an earlier step \u2014 do not re-derive, edit, or second-guess them.",
+    "",
+    "Run EXACTLY this single Bash command, verbatim, and nothing else:",
+    "```",
+    command,
+    "```",
+    "",
+    "If that command succeeds, its stdout contains the created pull request's URL (gh prints this on",
+    'success), typically ending in "/pull/<number>". Reply with exactly one line "RESULT: ok" followed',
+    "immediately, on the next lines, by exactly one JSON object and nothing else (no markdown fences,",
+    "no trailing commentary), of this exact shape:",
+    '{"url": "<the exact URL gh printed>", "number": <the integer after the final "/pull/" in that URL>}',
+    "",
+    "If the command fails because a pull request already exists for this branch (gh's error output",
+    "says something to the effect of a pull request for this branch already existing, usually with the",
+    `existing PR's own URL), reply with exactly one line "RESULT: branch-exists" and stop.`,
+    "",
+    'If the command fails for any other reason, reply with exactly one line "RESULT: error" followed',
+    "by the error text on the next line, and stop.",
+    "",
+    "Never run git push, git commit, git add, git reset, git rebase, git stash, or any command with a",
+    "force flag. Never run any command other than the single `gh pr create` command above."
+  ].join("\n");
+}
+function parseOutcomeLine4(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE6, "gim"))) {
+    lastMatch = match;
+  }
+  return lastMatch ? lastMatch[1] : "error";
+}
+function textAfterResultLine4(resultText) {
+  const lines = resultText.split("\n");
+  let lastIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^RESULT:\s*ok\s*$/im.test(lines[i])) lastIndex = i;
+  }
+  if (lastIndex === -1) return "";
+  return lines.slice(lastIndex + 1).join("\n").trim();
+}
+function parseCreatedPr(jsonText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const v = parsed;
+  if (typeof v.url !== "string" || typeof v.number !== "number") return null;
+  return { url: v.url, number: v.number };
+}
+function isValidInput2(input) {
+  if (typeof input !== "object" || input === null) return false;
+  const v = input;
+  return typeof v.title === "string" && v.title.length > 0 && typeof v.body === "string" && typeof v.targetBranch === "string" && v.targetBranch.length > 0;
+}
+function createPrOnlyIntendedCommandHook(input) {
+  const expectedCommand = buildGhPrCreateCommand(input);
+  return async (hookInput) => {
+    if (hookInput.hook_event_name !== "PreToolUse" || hookInput.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = hookInput.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    if (command === expectedCommand.trim()) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: 'Denied: create-pr may only run the single approved "gh pr create" command built from its exact input.'
+      }
+    };
+  };
+}
+async function createPr(input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    if (!isValidInput2(input)) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    let outcome = "error";
+    let resultText = "";
+    const stream = runQuery({
+      prompt: buildPrompt6(input),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // See create-branch.ts for why this must point at the locally
+        // installed `claude` CLI rather than the SDK's bundled native binary.
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [createPrOnlyIntendedCommandHook(input)] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          resultText = message.result;
+          outcome = parseOutcomeLine4(resultText);
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent create-pr: model's final reply did not contain a recognized RESULT line. Full reply:
+${resultText}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent create-pr: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "branch-exists") return { ok: false, reason: "branch-exists" };
+    if (outcome === "ok") {
+      const created = parseCreatedPr(textAfterResultLine4(resultText));
+      if (!created) {
+        process.stderr.write(`git-agent create-pr: could not parse created-PR JSON from model reply:
+${resultText}
+`);
+        return { ok: false, reason: "unexpected-error" };
+      }
+      return { ok: true, url: created.url, number: created.number };
+    }
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(
+      `git-agent create-pr: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`
+    );
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
+// subagent/src/actions/merge.ts
+var RESULT_LINE7 = /^RESULT:\s*(up-to-date|fast-forward|merged|invalid-target|conflict|error)\s*$/im;
+var FILE_LINE = /^FILE:\s*(.+)$/im;
+function escapeRegExp4(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+function splitRemoteQualified(from) {
+  const slashIndex = from.indexOf("/");
+  if (slashIndex <= 0 || slashIndex === from.length - 1) return null;
+  return { remote: from.slice(0, slashIndex), branch: from.slice(slashIndex + 1) };
+}
+function buildPrompt7(from) {
+  const remoteSplit = splitRemoteQualified(from);
+  const lines = [
+    `You are merging "${from}" into the current branch in the current repository, using a plain merge \u2014 never a rebase.`,
+    "Follow these steps exactly, in order, and do nothing else:",
+    "1. Run: git remote",
+    `2. Look at that output. If "${from}" contains a "/", take everything before the FIRST "/" as a candidate remote name and everything after it as a candidate branch name. If that candidate remote name appears as one of the exact lines printed by step 1, treat "${from}" as remote-qualified with that remote and branch; otherwise treat "${from}" as a plain local ref and skip step 3 entirely.`
+  ];
+  if (remoteSplit) {
+    lines.push(
+      `3. If (and only if) "${from}" was determined to be remote-qualified in step 2, run: git fetch ${remoteSplit.remote} ${remoteSplit.branch}`,
+      '   If that fetch fails, do not run any other command. Reply with exactly one line: "RESULT: error" followed by the error text on the next line, and stop.'
+    );
+  } else {
+    lines.push(`3. "${from}" has no "/", so it cannot be remote-qualified \u2014 skip any fetch.`);
+  }
+  lines.push(
+    `4. Run: git rev-parse --verify --quiet ${from}^{commit}`,
+    '   If that command exits with a non-zero status, do not run any other command. Reply with exactly one line: "RESULT: invalid-target" and stop.',
+    "5. Run: git rev-parse HEAD",
+    "   Remember this output exactly as PRE_HEAD.",
+    `6. Run: git merge --no-edit ${from}`,
+    "   Never pass -X ours, -X theirs, --squash, or any other flag beyond --no-edit. Never run git merge --abort, git rebase, or git reset, no matter what happens next or afterward.",
+    "7. If step 6 exited with a non-zero status (a conflict):",
+    "   Run: git status --porcelain=v1",
+    '   Identify every line whose two-letter status code has "U" in either position, or is exactly "AA" or "DD" \u2014 these are the conflicting files.',
+    "   Leave the working tree exactly as git left it \u2014 do not stage, commit, or abort anything.",
+    '   Reply with "RESULT: conflict" on its own line, followed by one "FILE: <path>" line per conflicting file (using the exact path from the status output), and stop.',
+    "8. If step 6 exited with status 0 (no conflict):",
+    "   Run: git rev-parse HEAD",
+    '   If this output is character-for-character identical to PRE_HEAD, reply with exactly one line: "RESULT: up-to-date" and stop.',
+    "   Otherwise, run: git log -1 --format=%P HEAD",
+    '   If that output contains exactly one commit hash, reply with exactly one line: "RESULT: fast-forward" and stop.',
+    '   If that output contains exactly two commit hashes, reply with exactly one line: "RESULT: merged" and stop.',
+    '   If it contains any other number of hashes, reply with "RESULT: error" followed by that output on the next line, and stop.',
+    "Never run git push, git rebase, git merge --abort, git reset, git stash, git commit, or any command with a force flag."
+  );
+  return lines.join("\n");
+}
+function parseOutcome3(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE7, "gim"))) {
+    lastMatch = match;
+  }
+  if (!lastMatch) return { outcome: "error", tail: "" };
+  return {
+    outcome: lastMatch[1],
+    tail: resultText.slice((lastMatch.index ?? 0) + lastMatch[0].length)
+  };
+}
+function parseConflictFiles(tail) {
+  const files = [];
+  for (const match of tail.matchAll(new RegExp(FILE_LINE, "gim"))) {
+    files.push(match[1].trim());
+  }
+  return files;
+}
+function mergeOnlyIntendedCommandsHook(from) {
+  const escapedFrom = escapeRegExp4(from);
+  const remoteSplit = splitRemoteQualified(from);
+  const allowedCommands = [
+    /^git remote$/,
+    new RegExp(`^git rev-parse --verify --quiet ${escapedFrom}\\^\\{commit\\}$`),
+    /^git rev-parse HEAD$/,
+    new RegExp(`^git merge --no-edit ${escapedFrom}$`),
+    /^git status --porcelain=v1$/,
+    /^git log -1 --format=%P HEAD$/
+  ];
+  if (remoteSplit) {
+    allowedCommands.push(
+      new RegExp(`^git fetch ${escapeRegExp4(remoteSplit.remote)} ${escapeRegExp4(remoteSplit.branch)}$`)
+    );
+  }
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    if (allowedCommands.some((pattern) => pattern.test(command))) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: merge may only run its fixed sequence of git commands for "${from}" (got: ${command}).`
+      }
+    };
+  };
+}
+async function merge(input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    const from = input?.from;
+    if (typeof from !== "string" || from.length === 0) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    let outcome = "error";
+    let tail = "";
+    const stream = runQuery({
+      prompt: buildPrompt7(from),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // Use the user's own locally installed `claude` CLI (resolved via
+        // PATH) as the execution backend — see create-branch.ts for why.
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [mergeOnlyIntendedCommandsHook(from)] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          ({ outcome, tail } = parseOutcome3(message.result));
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent merge: model's final reply did not contain a recognized RESULT line. Full reply:
+${message.result}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent merge: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "up-to-date" || outcome === "fast-forward" || outcome === "merged") {
+      return { ok: true, result: outcome };
+    }
+    if (outcome === "invalid-target") return { ok: false, reason: "invalid-target" };
+    if (outcome === "conflict") return { ok: false, reason: "conflict", files: parseConflictFiles(tail) };
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(`git-agent merge: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`);
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
+// subagent/src/actions/finish-merge.ts
+var RESULT_LINE8 = /^RESULT:\s*(completed|conflict|no-merge-in-progress|error)\s*$/im;
+var FILE_LINE2 = /^FILE:\s*(.+)$/im;
+function buildPrompt8() {
+  return [
+    "You are completing an in-progress git merge in the current repository, after the user has resolved its conflicts by hand.",
+    "Follow these steps exactly, in order, and do nothing else:",
+    "1. Run: git rev-parse -q --verify MERGE_HEAD",
+    "   If that command exits with a non-zero status (or prints nothing), there is no merge in progress.",
+    '   Do not run any other command. Reply with exactly one line: "RESULT: no-merge-in-progress" and stop.',
+    "2. Run: git status --porcelain=v1",
+    '   Identify every line whose two-letter status code has "U" in either position, or is exactly "AA" or "DD" \u2014 these are the unmerged files. Remember this exact list of paths; it never changes for the rest of these steps.',
+    "3. For each unmerged file from step 2, run: git diff --check -- <that file>",
+    '   If any of them still shows a leftover conflict marker, or you otherwise see "<<<<<<<", "=======", or ">>>>>>>" still present in any of these files, do not stage or commit anything.',
+    '   Reply with "RESULT: conflict" on its own line, followed by one "FILE: <path>" line per unmerged file that still has markers, and stop.',
+    '4. If none of the unmerged files from step 2 have any markers left, stage exactly those files, one at a time: run "git add <path>" once per file, using its exact path from step 2. Never run "git add -A", "git add -u", "git add .", or add any file not in that list.',
+    "5. Run: git commit --no-edit",
+    "   This must use the default merge commit message already set from MERGE_HEAD \u2014 never pass -m or any other message override, and never --amend.",
+    '6. If the commit in step 5 succeeds, reply with exactly one line: "RESULT: completed" and stop.',
+    '7. If the commit in step 5 fails for any reason, reply with "RESULT: error" followed by the error text on the next line, and stop.',
+    "Never run git merge --abort, git rebase, git reset, git stash, or any command with a force flag."
+  ].join("\n");
+}
+function parseOutcome4(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE8, "gim"))) {
+    lastMatch = match;
+  }
+  if (!lastMatch) return { outcome: "error", tail: "" };
+  return {
+    outcome: lastMatch[1],
+    tail: resultText.slice((lastMatch.index ?? 0) + lastMatch[0].length)
+  };
+}
+function parseConflictFiles2(tail) {
+  const files = [];
+  for (const match of tail.matchAll(new RegExp(FILE_LINE2, "gim"))) {
+    files.push(match[1].trim());
+  }
+  return files;
+}
+function finishMergeOnlyIntendedCommandsHook() {
+  const allowedExact = [/^git rev-parse -q --verify MERGE_HEAD$/, /^git status --porcelain=v1$/, /^git commit --no-edit$/];
+  const diffCheck = /^git diff --check( -- .+)?$/;
+  const singlePathAdd = /^git add (?:"[^"]+"|'[^']+'|(?!\.{1,2}$)[^\s"'-][^\s]*)$/;
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    const allowed = allowedExact.some((pattern) => pattern.test(command)) || diffCheck.test(command) || singlePathAdd.test(command);
+    if (allowed) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: finish-merge may only check merge/conflict state, add one exact unmerged path at a time, and commit with --no-edit (got: ${command}).`
+      }
+    };
+  };
+}
+async function finishMerge(_input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    let outcome = "error";
+    let tail = "";
+    const stream = runQuery({
+      prompt: buildPrompt8(),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // Use the user's own locally installed `claude` CLI (resolved via
+        // PATH) as the execution backend — see create-branch.ts for why.
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [finishMergeOnlyIntendedCommandsHook()] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          ({ outcome, tail } = parseOutcome4(message.result));
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent finish-merge: model's final reply did not contain a recognized RESULT line. Full reply:
+${message.result}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent finish-merge: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "completed") return { ok: true };
+    if (outcome === "conflict") return { ok: false, reason: "conflict", files: parseConflictFiles2(tail) };
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(`git-agent finish-merge: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`);
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
 // subagent/src/cli.ts
 var actions = {
   "create-branch": (input) => createBranch(input),
   "plan-commit": () => planCommit(),
-  "execute-commit": (input) => executeCommit(input)
+  "execute-commit": (input) => executeCommit(input),
+  push: (input) => push(input),
+  "draft-pr": (input) => draftPr(input),
+  "create-pr": (input) => createPr(input),
+  merge: (input) => merge(input),
+  "finish-merge": (input) => finishMerge(input)
 };
 async function readStdin() {
   const chunks = [];
