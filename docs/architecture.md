@@ -23,7 +23,7 @@ skills/git-agent-configure/           on-demand re-run of the same config flow (
 <installed repo>/.git-agent/config.json   per-repo settings (task types, default PR target)
 ```
 
-The `create-branch`, `push`, `draft-pr`, `create-pr`, `merge`, and `finish-merge` actions, the `no-force-push` hook, the `git-agent-create-branch`, `git-agent-push`, `git-agent-create-pr`, and `git-agent-update-branch` skills (each with its own bundled subagent copy), `git-agent-setup`, and `git-agent-configure` are built; the remaining actions/skills are still target, not built.
+The `create-branch`, `plan-commit`/`execute-commit`, `push`, `draft-pr`, `create-pr`, `merge`, and `finish-merge` actions, the `no-force-push` hook, the `git-agent-create-branch`, `git-agent-commit`, `git-agent-push`, `git-agent-create-pr`, and `git-agent-update-branch` skills (each with its own bundled subagent copy), `git-agent-setup`, and `git-agent-configure` are built; the remaining actions/skills are still target, not built.
 
 First-run setup is a skill (`git-agent-setup`, invoked as `/git-agent-setup`), not a separate `install/`-dir Node CLI run outside Claude Code — this keeps every Git-Agent capability reachable the same way (a slash-command skill), rather than inventing a second, `npx`/`bin`-based invocation path the project's bundled-into-skill-folder distribution story doesn't otherwise need.
 
@@ -55,7 +55,7 @@ These are the hard invariants. Nothing about how a skill is built should be able
 
 7. **There is no branch-parent tracking, anywhere.** `create-pr` never tries to detect what a branch was created from. The target branch always defaults to the repo's configured `defaultPrTarget`, shown to the user to confirm or override before the PR is actually created. A parent-tracking mechanism was considered and deliberately dropped — its failure modes (a stale record after a rename or delete) outweighed the convenience.
 8. **The subagent never touches the config file.** `.git-agent/config.json` (task/branch types, default PR target) is read and written directly by skills. `git-agent-setup` and `git-agent-configure` write it; every other skill reads it when it needs those values. The subagent has no config code path at all — config isn't git/GitHub work.
-9. **The commit plan has one fixed shape, and "local-only" detection belongs to the subagent, not the skill.** `plan-commit` is the only thing that decides a file looks local-only (things like `.env`, `.env.*`, `*.pem`, `*.key`, `credentials*`, `secrets*`, `*.local` — a seed list meant to grow). The skill never scans the working tree itself. `plan-commit` always succeeds (`ok: true`) and returns:
+9. **The commit plan has one fixed shape, and "local-only" detection belongs to the subagent, not the skill.** `plan-commit` is the only thing that decides a file looks local-only (things like `.env`, `.env.*`, `*.pem`, `*.key`, `credentials*`, `secrets*`, `*.local` — a seed list meant to grow). The skill never scans the working tree itself. Whenever there is anything to plan, `plan-commit` always succeeds (`ok: true`) rather than stopping on a local-only candidate — the one exception is a clean working tree, where it returns `{ "ok": false, "reason": "no-changes" }` instead. On success it returns:
 
    ```json
    {
@@ -101,6 +101,5 @@ These are the hard invariants. Nothing about how a skill is built should be able
 ## Known open items
 
 - How a subagent's git-planning quality (e.g. "is this a good commit split") gets verified is still an open question — left for implementation time, not a structural decision.
-- Exactly how `plan-commit` detects a repo's commit template (reading `commit.template` from git config vs. a hardcoded `.gitmessage` path) is left to its own implementation — this is internal to one action, so there's no risk of two parts of the system disagreeing about it.
 - Test-repo fixtures for exercising each skill haven't been designed yet.
 - There's no CI, hosting, or server-side component of any kind — Git-Agent is entirely local, installed per-repo.

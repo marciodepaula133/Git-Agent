@@ -16,6 +16,7 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..'
 // installed independently of the others.
 const SKILLS_NEEDING_SUBAGENT = [
   'git-agent-create-branch',
+  'git-agent-commit',
   'git-agent-push',
   'git-agent-create-pr',
   'git-agent-update-branch',

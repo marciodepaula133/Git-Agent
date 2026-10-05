@@ -1,14 +1,18 @@
 import type { HookCallback, HookCallbackMatcher, HookInput, SyncHookJSONOutput } from '@anthropic-ai/claude-agent-sdk';
 
 /**
- * Splits a shell command string into top-level segments (on `&&`, `||`, `;`, `|`)
- * and tokenizes each segment into words, respecting single/double quotes.
+ * Splits a shell command string into top-level segments (on `&&`, `||`, `;`, `|`,
+ * and — unless `splitOnNewline` is set to `false` — bare newlines) and
+ * tokenizes each segment into words, respecting single/double quotes.
  *
  * This is deliberately not a full shell parser — it's just enough to reason
  * about argument tokens rather than pattern-matching the raw string, per
- * docs/architecture.md rule 3.
+ * docs/architecture.md rule 3. `splitOnNewline: false` is for callers whose
+ * allowed commands legitimately span multiple lines (e.g. a heredoc-based
+ * `git apply`) and must not have each line treated as its own segment.
  */
-function splitIntoSegments(command: string): string[][] {
+export function splitIntoSegments(command: string, options: { splitOnNewline?: boolean } = {}): string[][] {
+  const splitOnNewline = options.splitOnNewline ?? true;
   const segments: string[][] = [];
   let current: string[] = [];
   let word = '';
@@ -65,7 +69,7 @@ function splitIntoSegments(command: string): string[][] {
       i++;
       continue;
     }
-    if (ch === ';' || ch === '|' || ch === '\n') {
+    if (ch === ';' || ch === '|' || (splitOnNewline && ch === '\n')) {
       pushSegment();
       continue;
     }

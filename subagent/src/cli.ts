@@ -1,5 +1,7 @@
 #!/usr/bin/env node
 import { createBranch, type CreateBranchInput } from './actions/create-branch.js';
+import { planCommit } from './actions/plan-commit.js';
+import { executeCommit } from './actions/execute-commit.js';
 import { push, type PushInput } from './actions/push.js';
 import { draftPr, type DraftPrInput } from './actions/draft-pr.js';
 import { createPr } from './actions/create-pr.js';
@@ -10,6 +12,8 @@ type ActionHandler = (input: unknown) => Promise<unknown>;
 
 const actions: Record<string, ActionHandler> = {
   'create-branch': (input) => createBranch(input as CreateBranchInput),
+  'plan-commit': () => planCommit(),
+  'execute-commit': (input) => executeCommit(input),
   push: (input) => push(input as PushInput),
   'draft-pr': (input) => draftPr(input as DraftPrInput),
   'create-pr': (input) => createPr(input),

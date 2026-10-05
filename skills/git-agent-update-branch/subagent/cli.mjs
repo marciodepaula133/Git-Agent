@@ -23960,7 +23960,8 @@ function cze(e, t) {
 }
 
 // subagent/src/hooks/no-force-push.ts
-function splitIntoSegments(command) {
+function splitIntoSegments(command, options = {}) {
+  const splitOnNewline = options.splitOnNewline ?? true;
   const segments = [];
   let current = [];
   let word = "";
@@ -24011,7 +24012,7 @@ function splitIntoSegments(command) {
       i++;
       continue;
     }
-    if (ch2 === ";" || ch2 === "|" || ch2 === "\n") {
+    if (ch2 === ";" || ch2 === "|" || splitOnNewline && ch2 === "\n") {
       pushSegment();
       continue;
     }
@@ -24250,9 +24251,464 @@ ${message.result}
   }
 }
 
+// subagent/src/actions/plan-commit.ts
+var LOCAL_ONLY_PATTERNS = [".env", ".env.*", "*.pem", "*.key", "credentials*", "secrets*", "*.local"];
+var RESULT_LINE2 = /^RESULT:\s*(ok|no-changes|error)\s*$/im;
+function buildPrompt2() {
+  return [
+    "You are planning a split, reviewable commit history for the CURRENT working tree of the git",
+    "repository in the current directory. This is a read-only planning pass: you must not stage,",
+    "commit, stash, reset, or otherwise modify the working tree, the index, or history.",
+    "",
+    "Follow these steps, in order:",
+    "1. Run: git status --porcelain=v1",
+    "   to see every tracked and untracked change.",
+    "2. If that shows no changes at all (a clean working tree), reply with exactly one line:",
+    '   "RESULT: no-changes" and stop. Do not run any other command.',
+    "3. For every tracked, modified file, run `git diff -- <file>` (and `git diff --cached -- <file>`",
+    "   if it also has staged changes) to see its exact hunks and line numbers.",
+    "4. Classify every untracked or modified file against this fixed list of local-only filename",
+    `   patterns (glob-style, matched against the file's basename or full relative path): ${LOCAL_ONLY_PATTERNS.join(", ")}.`,
+    '   Any file matching one of these patterns is a "local-only candidate": it must never appear in',
+    "   any proposed commit's hunks \u2014 leave it out of every commit entirely, and list it only under",
+    "   localOnlyCandidates.",
+    "5. Group the remaining changes into one or more topic-coherent commits. Split unrelated changes",
+    "   into separate commits, including splitting a single file's hunks by line range across",
+    "   different commits when that one file holds two unrelated topics.",
+    "6. Work out the commit message format: run `git config --get commit.template`. If it prints a",
+    "   path, read that file with the Read tool and shape every commit message to follow its",
+    "   structure. If the command prints nothing (no template configured), run",
+    '   `git branch --show-current` and use the default format "<type>: <summary>" when the current',
+    "   branch name has a `<type>/...` shape; otherwise use a plain one-line summary.",
+    '7. Reply with exactly one line "RESULT: ok" followed immediately, on the next lines, by exactly',
+    "   one JSON object and nothing else (no markdown fences, no trailing commentary), of this exact",
+    "   shape:",
+    '   {"commits": [{"id": 0, "message": "...", "hunks": [{"file": "...", "startLine": 1, "endLine": 10}]}], "localOnlyCandidates": [{"file": "..."}]}',
+    '   - "id" is a zero-based integer, unique per commit, in the order the commits should be made.',
+    `   - "startLine"/"endLine" are 1-based, inclusive line numbers in the file's new (working-tree)`,
+    "     version, describing exactly the span of this commit's hunk.",
+    "   - Every changed, non-local-only file must be fully covered by the hunks across the commits it",
+    "     appears in.",
+    "   - localOnlyCandidates lists every file matched in step 4, and nothing else.",
+    "8. If anything prevents you from producing a valid plan (an unexpected git error, an unreadable",
+    '   file, etc.), reply with exactly one line "RESULT: error" followed by the error text on the',
+    "   next line, and stop.",
+    "",
+    "Never run git add, git commit, git push, git reset, git stash, git rebase, git checkout, git",
+    "apply, git clean, or any other command that mutates the working tree, the index, or history."
+  ].join("\n");
+}
+function parseOutcomeLine(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE2, "gim"))) {
+    lastMatch = match;
+  }
+  return lastMatch ? lastMatch[1] : "error";
+}
+function textAfterResultLine(resultText) {
+  const lines = resultText.split("\n");
+  let lastIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^RESULT:\s*ok\s*$/im.test(lines[i])) lastIndex = i;
+  }
+  if (lastIndex === -1) return "";
+  return lines.slice(lastIndex + 1).join("\n").trim();
+}
+function isHunk(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value;
+  return typeof v.file === "string" && typeof v.startLine === "number" && typeof v.endLine === "number";
+}
+function isPlannedCommit(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value;
+  return typeof v.id === "number" && typeof v.message === "string" && Array.isArray(v.hunks) && v.hunks.every(isHunk);
+}
+function isLocalOnlyCandidate(value) {
+  if (typeof value !== "object" || value === null) return false;
+  return typeof value.file === "string";
+}
+function parsePlanJson(jsonText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const v = parsed;
+  if (!Array.isArray(v.commits) || !v.commits.every(isPlannedCommit)) return null;
+  if (!Array.isArray(v.localOnlyCandidates) || !v.localOnlyCandidates.every(isLocalOnlyCandidate)) return null;
+  return { commits: v.commits, localOnlyCandidates: v.localOnlyCandidates };
+}
+function planCommitReadOnlyHook() {
+  const allowedPatterns = [
+    /^git status(\s+--porcelain(=v1)?)?$/,
+    /^git diff(\s+--cached)?\s+--\s+\S+$/,
+    /^git config --get commit\.template$/,
+    /^git branch --show-current$/
+  ];
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    const segments = splitIntoSegments(command);
+    const allAllowed = segments.length > 0 && segments.every((tokens) => allowedPatterns.some((pattern) => pattern.test(tokens.join(" "))));
+    if (allAllowed) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: plan-commit is a read-only planning pass and may only run git status/diff/config/branch inspection commands (got: ${command}).`
+      }
+    };
+  };
+}
+async function planCommit(deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    let outcome = "error";
+    let resultText = "";
+    const stream = runQuery({
+      prompt: buildPrompt2(),
+      options: {
+        tools: ["Bash", "Read"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        // See create-branch.ts for why this must point at the locally
+        // installed `claude` CLI rather than the SDK's bundled native binary.
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [planCommitReadOnlyHook()] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          resultText = message.result;
+          outcome = parseOutcomeLine(resultText);
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent plan-commit: model's final reply did not contain a recognized RESULT line. Full reply:
+${resultText}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent plan-commit: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "no-changes") return { ok: false, reason: "no-changes" };
+    if (outcome === "ok") {
+      const plan = parsePlanJson(textAfterResultLine(resultText));
+      if (!plan) {
+        process.stderr.write(`git-agent plan-commit: could not parse plan JSON from model reply:
+${resultText}
+`);
+        return { ok: false, reason: "unexpected-error" };
+      }
+      return { ok: true, commits: plan.commits, localOnlyCandidates: plan.localOnlyCandidates };
+    }
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(
+      `git-agent plan-commit: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`
+    );
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
+// subagent/src/actions/execute-commit.ts
+var RESULT_LINE3 = /^RESULT:\s*(ok|conflict|no-changes|error)\s*$/im;
+function validateCommitEdits(commits, edits) {
+  const validIds = new Set(commits.map((c) => c.id));
+  const excluded = /* @__PURE__ */ new Set();
+  for (const id2 of edits?.exclude ?? []) {
+    if (typeof id2 !== "number" || !validIds.has(id2)) return null;
+    excluded.add(id2);
+  }
+  const mergeMap = /* @__PURE__ */ new Map();
+  for (const pair of edits?.merge ?? []) {
+    if (!Array.isArray(pair) || pair.length !== 2) return null;
+    const [from, into] = pair;
+    if (typeof from !== "number" || typeof into !== "number") return null;
+    if (!validIds.has(from) || !validIds.has(into)) return null;
+    if (from === into) return null;
+    if (excluded.has(from) || excluded.has(into)) return null;
+    mergeMap.set(from, into);
+  }
+  for (const start of mergeMap.keys()) {
+    const seen = /* @__PURE__ */ new Set([start]);
+    let current = start;
+    while (mergeMap.has(current)) {
+      current = mergeMap.get(current);
+      if (seen.has(current)) return null;
+      seen.add(current);
+    }
+    if (excluded.has(current)) return null;
+  }
+  return { excluded, mergeMap };
+}
+function resolveSurvivor(id2, mergeMap) {
+  let current = id2;
+  while (mergeMap.has(current)) {
+    current = mergeMap.get(current);
+  }
+  return current;
+}
+function applyCommitEdits(commits, excluded, mergeMap) {
+  const byId = new Map(commits.map((c) => [c.id, c]));
+  const survivorOrder = [];
+  const survivorHunks = /* @__PURE__ */ new Map();
+  for (const commit of commits) {
+    if (excluded.has(commit.id)) continue;
+    const survivorId = resolveSurvivor(commit.id, mergeMap);
+    if (!survivorHunks.has(survivorId)) {
+      survivorHunks.set(survivorId, []);
+      survivorOrder.push(survivorId);
+    }
+    survivorHunks.get(survivorId)?.push(...commit.hunks);
+  }
+  return survivorOrder.map((id2) => ({
+    id: id2,
+    message: byId.get(id2).message,
+    hunks: survivorHunks.get(id2)
+  }));
+}
+function buildPrompt3(finalCommits, includedLocalOnlyFiles) {
+  return [
+    "You are executing an already-approved commit plan against the CURRENT working tree of the git",
+    "repository in the current directory. The plan below was produced by an earlier planning pass and",
+    "already reviewed by the user \u2014 do not re-plan, re-split, or second-guess it. Commit using EXACTLY",
+    "the hunks given below, never a fresh `git diff` of the current tree.",
+    "",
+    'Final commits to create, in order (each "hunks" entry is `file` plus an inclusive 1-based',
+    "`startLine`-`endLine` range in that file's working-tree version, exactly as originally planned):",
+    JSON.stringify(finalCommits, null, 2),
+    "",
+    includedLocalOnlyFiles.length > 0 ? [
+      "In addition, after the commits above, create one more commit per file in this list \u2014 each",
+      "such file is untracked and was flagged as possibly local-only, but the user explicitly chose",
+      "to include it. Stage the file in its entirety (it has no hunks) with `git add <file>` and",
+      "commit it on its own with a short one-line message describing adding that file:",
+      JSON.stringify(includedLocalOnlyFiles)
+    ].join("\n") : "There are no local-only files to additionally include \u2014 every local-only candidate was excluded or had no decision, so none of them must be touched, staged, or committed.",
+    "",
+    "For every file that is a local-only candidate and is NOT in the include list above, never run",
+    "git add, git apply, or any other command against it \u2014 leave it exactly as it is in the working",
+    "tree (still untracked/modified).",
+    "",
+    "If the final list of commits above is empty AND there are no local-only files to include, reply",
+    'with exactly one line "RESULT: no-changes" and stop without running any other command.',
+    "",
+    "Otherwise, for each commit in order:",
+    "1. For each of its hunks, stage EXACTLY that file's startLine-endLine span \u2014 never the whole",
+    "   file unless the hunk covers the whole file. Build a unified diff patch scoped to that line",
+    "   range (comparing the file's current HEAD/index version against its working-tree version) and",
+    "   apply it with a single `git apply --cached <<'PATCH'` ... `PATCH` heredoc, all as one Bash",
+    "   command \u2014 the patch body must be delivered via that inline heredoc, never piped in from a",
+    "   separate command (no `printf | git apply --cached`, no `cat <<EOF | git apply --cached`, no",
+    "   writing the patch to a file first). Do not use `git add <file>` for a partial-file hunk.",
+    "2. If a hunk no longer applies cleanly (the working tree changed since planning in a way that",
+    '   invalidates that exact line range), reply with exactly one line "RESULT: conflict" followed by',
+    "   which file/commit failed on the next line, and stop immediately. Do not create the conflicting",
+    "   commit or any commit after it. If you already created earlier commits in this same run before",
+    "   hitting the conflict, that is fine and expected \u2014 each commit is atomic on its own and stays",
+    "   made; only the conflicting commit and everything after it are left uncommitted.",
+    '3. Once every hunk for this commit is staged, run `git commit -m "<message>"` with that commit\'s',
+    "   exact message.",
+    "",
+    "After all commits (and any local-only inclusions) succeed, reply with exactly one line",
+    '"RESULT: ok" followed immediately, on the next lines, by exactly one JSON object and nothing else',
+    "(no markdown fences, no commentary), of this exact shape:",
+    '{"commits": [{"id": 0, "sha": "<full commit sha from git rev-parse HEAD right after committing it>", "message": "..."}]}',
+    "Include one entry per commit actually created, in the order created (plan commits first, then any",
+    "local-only inclusion commits, each with a synthetic negative id starting at -1, -2, ... so ids",
+    "never collide with plan commit ids).",
+    "",
+    'If anything else unexpected happens, reply with exactly one line "RESULT: error" followed by the',
+    "error text on the next line, and stop.",
+    "",
+    "Never run git push, git reset --hard, git rebase, git stash, git clean, or any force-flagged",
+    "command. Never modify the content of any file \u2014 only stage and commit what already exists in the",
+    "working tree."
+  ].join("\n");
+}
+function parseOutcomeLine2(resultText) {
+  let lastMatch = null;
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE3, "gim"))) {
+    lastMatch = match;
+  }
+  return lastMatch ? lastMatch[1] : "error";
+}
+function textAfterResultLine2(resultText) {
+  const lines = resultText.split("\n");
+  let lastIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (/^RESULT:\s*ok\s*$/im.test(lines[i])) lastIndex = i;
+  }
+  if (lastIndex === -1) return "";
+  return lines.slice(lastIndex + 1).join("\n").trim();
+}
+function isExecutedCommit(value) {
+  if (typeof value !== "object" || value === null) return false;
+  const v = value;
+  return typeof v.id === "number" && typeof v.sha === "string" && typeof v.message === "string";
+}
+function parseExecutedCommits(jsonText) {
+  let parsed;
+  try {
+    parsed = JSON.parse(jsonText);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+  const v = parsed;
+  if (!Array.isArray(v.commits) || !v.commits.every(isExecutedCommit)) return null;
+  return v.commits;
+}
+function isValidInput(input) {
+  if (typeof input !== "object" || input === null) return false;
+  const v = input;
+  const plan = v.plan;
+  if (typeof plan !== "object" || plan === null) return false;
+  if (!Array.isArray(plan.commits)) return false;
+  if (!Array.isArray(plan.localOnlyCandidates)) return false;
+  if (typeof v.decisions !== "object" || v.decisions === null) return false;
+  return true;
+}
+function executeCommitAllowedCommandsHook(allowedAddFiles) {
+  const addFiles = new Set(allowedAddFiles);
+  const fixedShapePatterns = [
+    /^git status$/,
+    /^git diff( --cached)?( -- \S+)?$/,
+    /^git rev-parse \S+$/
+  ];
+  function isAllowedSegment(tokens) {
+    if (tokens[0] !== "git") return false;
+    if (fixedShapePatterns.some((pattern) => pattern.test(tokens.join(" ")))) return true;
+    if (tokens[1] === "apply" && tokens[2] === "--cached") return true;
+    if (tokens[1] === "add" && tokens.length === 3 && addFiles.has(tokens[2])) return true;
+    if (tokens[1] === "commit" && tokens[2] === "-m" && tokens.length === 4) return true;
+    return false;
+  }
+  return async (input) => {
+    if (input.hook_event_name !== "PreToolUse" || input.tool_name !== "Bash") {
+      return {};
+    }
+    const toolInput = input.tool_input;
+    const command = typeof toolInput?.command === "string" ? toolInput.command.trim() : "";
+    const segments = splitIntoSegments(command, { splitOnNewline: false });
+    const allAllowed = segments.length > 0 && segments.every(isAllowedSegment);
+    if (allAllowed) {
+      return {
+        hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" }
+      };
+    }
+    return {
+      hookSpecificOutput: {
+        hookEventName: "PreToolUse",
+        permissionDecision: "deny",
+        permissionDecisionReason: `Denied: execute-commit may only run status/diff/apply --cached/add <approved file>/commit -m "<message>"/rev-parse commands (got: ${command}).`
+      }
+    };
+  };
+}
+async function executeCommit(input, deps = {}) {
+  const runQuery = deps.queryFn ?? lze;
+  try {
+    if (!isValidInput(input)) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    const validatedEdits = validateCommitEdits(input.plan.commits, input.decisions.commitEdits);
+    if (!validatedEdits) {
+      return { ok: false, reason: "unexpected-error" };
+    }
+    const finalCommits = applyCommitEdits(input.plan.commits, validatedEdits.excluded, validatedEdits.mergeMap);
+    const localOnlyDecisions = input.decisions.localOnly ?? {};
+    const includedLocalOnlyFiles = Object.entries(localOnlyDecisions).filter(([, decision]) => decision === "include").map(([file]) => file);
+    if (finalCommits.length === 0 && includedLocalOnlyFiles.length === 0) {
+      return { ok: false, reason: "no-changes" };
+    }
+    let outcome = "error";
+    let resultText = "";
+    const stream = runQuery({
+      prompt: buildPrompt3(finalCommits, includedLocalOnlyFiles),
+      options: {
+        tools: ["Bash"],
+        permissionMode: "bypassPermissions",
+        allowDangerouslySkipPermissions: true,
+        pathToClaudeCodeExecutable: "claude",
+        hooks: {
+          PreToolUse: [
+            noForcePushHookMatcher,
+            { matcher: "Bash", hooks: [executeCommitAllowedCommandsHook(includedLocalOnlyFiles)] }
+          ]
+        }
+      }
+    });
+    for await (const message of stream) {
+      if (message.type === "result") {
+        if (message.subtype === "success") {
+          resultText = message.result;
+          outcome = parseOutcomeLine2(resultText);
+          if (outcome === "error") {
+            process.stderr.write(
+              `git-agent execute-commit: model's final reply did not contain a recognized RESULT line. Full reply:
+${resultText}
+`
+            );
+          }
+        } else {
+          outcome = "error";
+          process.stderr.write(
+            `git-agent execute-commit: session ended with subtype "${message.subtype}" (is_error=${message.is_error}, stop_reason=${String(message.stop_reason)}). errors: ${JSON.stringify(message.errors)}
+`
+          );
+        }
+      }
+    }
+    if (outcome === "no-changes") return { ok: false, reason: "no-changes" };
+    if (outcome === "conflict") return { ok: false, reason: "conflict" };
+    if (outcome === "ok") {
+      const commits = parseExecutedCommits(textAfterResultLine2(resultText));
+      if (!commits) {
+        process.stderr.write(`git-agent execute-commit: could not parse commits JSON from model reply:
+${resultText}
+`);
+        return { ok: false, reason: "unexpected-error" };
+      }
+      return { ok: true, commits };
+    }
+    return { ok: false, reason: "unexpected-error" };
+  } catch (error) {
+    process.stderr.write(
+      `git-agent execute-commit: unexpected exception: ${error instanceof Error ? error.stack ?? error.message : String(error)}
+`
+    );
+    return { ok: false, reason: "unexpected-error" };
+  }
+}
+
 // subagent/src/actions/push.ts
-var RESULT_LINE2 = /^RESULT:\s*(pushed|non-fast-forward|wrong-branch|error)\s*$/im;
-function buildPrompt2(branchName) {
+var RESULT_LINE4 = /^RESULT:\s*(pushed|non-fast-forward|wrong-branch|error)\s*$/im;
+function buildPrompt4(branchName) {
   return [
     `You are pushing the local branch named exactly "${branchName}" to its remote.`,
     "Follow these steps exactly, in order, and do nothing else:",
@@ -24279,7 +24735,7 @@ function buildPrompt2(branchName) {
 }
 function parseOutcome2(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE2, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE4, "gim"))) {
     lastMatch = match;
   }
   return lastMatch ? lastMatch[1] : "error";
@@ -24324,7 +24780,7 @@ async function push(input, deps = {}) {
     }
     let outcome = "error";
     const stream = runQuery({
-      prompt: buildPrompt2(branchName),
+      prompt: buildPrompt4(branchName),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24381,11 +24837,11 @@ ${message.result}
 }
 
 // subagent/src/actions/draft-pr.ts
-var RESULT_LINE3 = /^RESULT:\s*(ok|invalid-target|no-changes|error)\s*$/im;
+var RESULT_LINE5 = /^RESULT:\s*(ok|invalid-target|no-changes|error)\s*$/im;
 function escapeRegExp3(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
-function buildPrompt3(targetBranch) {
+function buildPrompt5(targetBranch) {
   return [
     `You are drafting a pull request for the current branch of the git repository in the current`,
     `directory, targeting "${targetBranch}". This is a read-only pass: you must not stage, commit,`,
@@ -24441,14 +24897,14 @@ function buildPrompt3(targetBranch) {
     "remote except the read-only `git ls-remote` check in step 2."
   ].join("\n");
 }
-function parseOutcomeLine(resultText) {
+function parseOutcomeLine3(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE3, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE5, "gim"))) {
     lastMatch = match;
   }
   return lastMatch ? lastMatch[1] : "error";
 }
-function textAfterResultLine(resultText) {
+function textAfterResultLine3(resultText) {
   const lines = resultText.split("\n");
   let lastIndex = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -24508,7 +24964,7 @@ async function draftPr(input, deps = {}) {
     let outcome = "error";
     let resultText = "";
     const stream = runQuery({
-      prompt: buildPrompt3(targetBranch),
+      prompt: buildPrompt5(targetBranch),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24528,7 +24984,7 @@ async function draftPr(input, deps = {}) {
       if (message.type === "result") {
         if (message.subtype === "success") {
           resultText = message.result;
-          outcome = parseOutcomeLine(resultText);
+          outcome = parseOutcomeLine3(resultText);
           if (outcome === "error") {
             process.stderr.write(
               `git-agent draft-pr: model's final reply did not contain a recognized RESULT line. Full reply:
@@ -24548,7 +25004,7 @@ ${resultText}
     if (outcome === "invalid-target") return { ok: false, reason: "invalid-target" };
     if (outcome === "no-changes") return { ok: false, reason: "no-changes" };
     if (outcome === "ok") {
-      const draft = parseDraftJson(textAfterResultLine(resultText));
+      const draft = parseDraftJson(textAfterResultLine3(resultText));
       if (!draft) {
         process.stderr.write(`git-agent draft-pr: could not parse draft JSON from model reply:
 ${resultText}
@@ -24568,11 +25024,11 @@ ${resultText}
 }
 
 // subagent/src/actions/create-pr.ts
-var RESULT_LINE4 = /^RESULT:\s*(ok|branch-exists|error)\s*$/im;
+var RESULT_LINE6 = /^RESULT:\s*(ok|branch-exists|error)\s*$/im;
 function buildGhPrCreateCommand(input) {
   return [`gh pr create --base "${input.targetBranch}" --title "${input.title}" --body-file - <<'EOF'`, input.body, "EOF"].join("\n");
 }
-function buildPrompt4(input) {
+function buildPrompt6(input) {
   const command = buildGhPrCreateCommand(input);
   return [
     "You are opening a pull request for the current branch of the git repository in the current",
@@ -24601,14 +25057,14 @@ function buildPrompt4(input) {
     "force flag. Never run any command other than the single `gh pr create` command above."
   ].join("\n");
 }
-function parseOutcomeLine2(resultText) {
+function parseOutcomeLine4(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE4, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE6, "gim"))) {
     lastMatch = match;
   }
   return lastMatch ? lastMatch[1] : "error";
 }
-function textAfterResultLine2(resultText) {
+function textAfterResultLine4(resultText) {
   const lines = resultText.split("\n");
   let lastIndex = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -24629,7 +25085,7 @@ function parseCreatedPr(jsonText) {
   if (typeof v.url !== "string" || typeof v.number !== "number") return null;
   return { url: v.url, number: v.number };
 }
-function isValidInput(input) {
+function isValidInput2(input) {
   if (typeof input !== "object" || input === null) return false;
   const v = input;
   return typeof v.title === "string" && v.title.length > 0 && typeof v.body === "string" && typeof v.targetBranch === "string" && v.targetBranch.length > 0;
@@ -24659,13 +25115,13 @@ function createPrOnlyIntendedCommandHook(input) {
 async function createPr(input, deps = {}) {
   const runQuery = deps.queryFn ?? lze;
   try {
-    if (!isValidInput(input)) {
+    if (!isValidInput2(input)) {
       return { ok: false, reason: "unexpected-error" };
     }
     let outcome = "error";
     let resultText = "";
     const stream = runQuery({
-      prompt: buildPrompt4(input),
+      prompt: buildPrompt6(input),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24685,7 +25141,7 @@ async function createPr(input, deps = {}) {
       if (message.type === "result") {
         if (message.subtype === "success") {
           resultText = message.result;
-          outcome = parseOutcomeLine2(resultText);
+          outcome = parseOutcomeLine4(resultText);
           if (outcome === "error") {
             process.stderr.write(
               `git-agent create-pr: model's final reply did not contain a recognized RESULT line. Full reply:
@@ -24704,7 +25160,7 @@ ${resultText}
     }
     if (outcome === "branch-exists") return { ok: false, reason: "branch-exists" };
     if (outcome === "ok") {
-      const created = parseCreatedPr(textAfterResultLine2(resultText));
+      const created = parseCreatedPr(textAfterResultLine4(resultText));
       if (!created) {
         process.stderr.write(`git-agent create-pr: could not parse created-PR JSON from model reply:
 ${resultText}
@@ -24724,7 +25180,7 @@ ${resultText}
 }
 
 // subagent/src/actions/merge.ts
-var RESULT_LINE5 = /^RESULT:\s*(up-to-date|fast-forward|merged|invalid-target|conflict|error)\s*$/im;
+var RESULT_LINE7 = /^RESULT:\s*(up-to-date|fast-forward|merged|invalid-target|conflict|error)\s*$/im;
 var FILE_LINE = /^FILE:\s*(.+)$/im;
 function escapeRegExp4(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -24734,7 +25190,7 @@ function splitRemoteQualified(from) {
   if (slashIndex <= 0 || slashIndex === from.length - 1) return null;
   return { remote: from.slice(0, slashIndex), branch: from.slice(slashIndex + 1) };
 }
-function buildPrompt5(from) {
+function buildPrompt7(from) {
   const remoteSplit = splitRemoteQualified(from);
   const lines = [
     `You are merging "${from}" into the current branch in the current repository, using a plain merge \u2014 never a rebase.`,
@@ -24775,7 +25231,7 @@ function buildPrompt5(from) {
 }
 function parseOutcome3(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE5, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE7, "gim"))) {
     lastMatch = match;
   }
   if (!lastMatch) return { outcome: "error", tail: "" };
@@ -24837,7 +25293,7 @@ async function merge(input, deps = {}) {
     let outcome = "error";
     let tail = "";
     const stream = runQuery({
-      prompt: buildPrompt5(from),
+      prompt: buildPrompt7(from),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -24887,9 +25343,9 @@ ${message.result}
 }
 
 // subagent/src/actions/finish-merge.ts
-var RESULT_LINE6 = /^RESULT:\s*(completed|conflict|no-merge-in-progress|error)\s*$/im;
+var RESULT_LINE8 = /^RESULT:\s*(completed|conflict|no-merge-in-progress|error)\s*$/im;
 var FILE_LINE2 = /^FILE:\s*(.+)$/im;
-function buildPrompt6() {
+function buildPrompt8() {
   return [
     "You are completing an in-progress git merge in the current repository, after the user has resolved its conflicts by hand.",
     "Follow these steps exactly, in order, and do nothing else:",
@@ -24911,7 +25367,7 @@ function buildPrompt6() {
 }
 function parseOutcome4(resultText) {
   let lastMatch = null;
-  for (const match of resultText.matchAll(new RegExp(RESULT_LINE6, "gim"))) {
+  for (const match of resultText.matchAll(new RegExp(RESULT_LINE8, "gim"))) {
     lastMatch = match;
   }
   if (!lastMatch) return { outcome: "error", tail: "" };
@@ -24958,7 +25414,7 @@ async function finishMerge(_input, deps = {}) {
     let outcome = "error";
     let tail = "";
     const stream = runQuery({
-      prompt: buildPrompt6(),
+      prompt: buildPrompt8(),
       options: {
         tools: ["Bash"],
         permissionMode: "bypassPermissions",
@@ -25007,6 +25463,8 @@ ${message.result}
 // subagent/src/cli.ts
 var actions = {
   "create-branch": (input) => createBranch(input),
+  "plan-commit": () => planCommit(),
+  "execute-commit": (input) => executeCommit(input),
   push: (input) => push(input),
   "draft-pr": (input) => draftPr(input),
   "create-pr": (input) => createPr(input),
